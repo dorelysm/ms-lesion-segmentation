@@ -1,0 +1,32 @@
+# Baseline 2D U-Net config for MS lesion segmentation.
+# Same file is used on both machines; only --smoke-test (CLI flag) changes behavior.
+
+data:
+  index_csv: data/processed/index.csv
+  modalities: [t1, t2, flair]   # determines model in_channels (len(modalities))
+  image_size: 256
+
+split:
+  n_folds: 5
+  seed: 42
+  folds_to_run: [0]              # which fold indices to train; e.g. [0,1,2,3,4] for full CV
+
+model:
+  base_channels: 32
+
+train:
+  batch_size: 8
+  num_workers: 2
+  lr: 0.0001
+  epochs: 50
+  bce_weight: 0.5                # weight of BCE vs Dice in the combined loss
+  augment: true
+
+output:
+  checkpoint_dir: outputs/checkpoints
+  figures_dir: outputs/figures
+
+smoke_test:
+  patient_limit: 4
+  epochs: 2
+  batch_size: 2

@@ -1,0 +1,29 @@
+# Data (downloaded/generated, not versioned)
+data/raw/
+data/processed/
+
+# Model artifacts
+outputs/checkpoints/
+*.pt
+*.pth
+
+# Kaggle credentials (never commit)
+kaggle.json
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+.vscode/
+
+# Claude Code local state
+.claude/
