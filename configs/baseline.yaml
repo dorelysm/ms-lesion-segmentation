@@ -18,8 +18,13 @@ train:
   batch_size: 8
   num_workers: 2
   lr: 0.0001
-  epochs: 50
-  bce_weight: 0.5                # weight of BCE vs Dice in the combined loss
+  epochs: 100                    # increased; early stopping will cut this short when val Dice plateaus
+  loss: tversky                  # "tversky" or "dice_bce"
+  tversky_alpha: 0.7             # penalty weight for false negatives (missed lesions)
+  tversky_beta: 0.3              # penalty weight for false positives
+  bce_weight: 0.5                # only used when loss=dice_bce
+  lr_patience: 5                 # ReduceLROnPlateau: halve LR after this many epochs without val Dice improvement
+  early_stop_patience: 15        # stop fold training after this many epochs without val Dice improvement
   augment: true
 
 output:

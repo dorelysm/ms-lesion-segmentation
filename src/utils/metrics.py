@@ -62,3 +62,27 @@ class DiceBCELoss(torch.nn.Module):
         intersection = (probs * target).sum()
         dice_loss = 1 - (2 * intersection + self.eps) / (probs.sum() + target.sum() + self.eps)
         return self.bce_weight * bce_loss + (1 - self.bce_weight) * dice_loss
+
+
+class TverskyLoss(torch.nn.Module):
+    """Tversky loss for imbalanced segmentation.
+
+    alpha controls the penalty for false negatives (missed lesions).
+    alpha=0.5, beta=0.5 reduces to Dice loss.
+    alpha=0.7 penalises false negatives more than false positives,
+    which improves sensitivity on minority classes like MS lesions.
+    """
+
+    def __init__(self, alpha: float = 0.7, beta: float = 0.3, eps: float = 1e-6):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.eps = eps
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        true_pos = (probs * target).sum()
+        false_neg = (target * (1 - probs)).sum()
+        false_pos = ((1 - target) * probs).sum()
+        tversky = (true_pos + self.eps) / (true_pos + self.alpha * false_neg + self.beta * false_pos + self.eps)
+        return 1 - tversky

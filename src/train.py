@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))  # allow `python src/train.py` as well as 
 
 from src.data.dataset import MSLesionDataset, patient_kfold_splits
 from src.models.unet import UNet2D
-from src.utils.metrics import DiceBCELoss, compute_all
+from src.utils.metrics import DiceBCELoss, TverskyLoss, compute_all
 
 
 def load_config(config_path: Path) -> dict:
@@ -77,14 +77,24 @@ def train_fold(fold_idx: int, train_ids: list, val_ids: list, index_df: pd.DataF
     in_channels = len(cfg["data"]["modalities"])
     model = UNet2D(in_channels=in_channels, out_channels=1, base_channels=cfg["model"]["base_channels"]).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg["lr"])
-    criterion = DiceBCELoss(bce_weight=train_cfg["bce_weight"])
+
+    loss_name = train_cfg.get("loss", "dice_bce")
+    if loss_name == "tversky":
+        criterion = TverskyLoss(alpha=train_cfg.get("tversky_alpha", 0.7), beta=train_cfg.get("tversky_beta", 0.3))
+    else:
+        criterion = DiceBCELoss(bce_weight=train_cfg["bce_weight"])
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=train_cfg.get("lr_patience", 5)
+    )
+    early_stop_patience = train_cfg.get("early_stop_patience", 15)
 
     checkpoint_dir = PROJECT_ROOT / cfg["output"]["checkpoint_dir"]
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    best_val_dice, history = -1.0, []
+    best_val_dice, epochs_no_improve, history = -1.0, 0, []
 
     print(f"\n=== Fold {fold_idx}: {len(train_ids)} train patients, {len(val_ids)} val patients, "
-          f"{len(train_ds)} train slices, {len(val_ds)} val slices, device={device} ===")
+          f"{len(train_ds)} train slices, {len(val_ds)} val slices, device={device}, loss={loss_name} ===")
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -92,6 +102,7 @@ def train_fold(fold_idx: int, train_ids: list, val_ids: list, index_df: pd.DataF
         val_metrics = run_epoch(model, val_loader, criterion, device, optimizer=None)
         elapsed = time.time() - t0
 
+        scheduler.step(val_metrics["dice"])
         history.append({"epoch": epoch, "train": train_metrics, "val": val_metrics, "seconds": elapsed})
         print(f"[fold {fold_idx}] epoch {epoch}/{epochs} "
               f"train_loss={train_metrics['loss']:.4f} train_dice={train_metrics['dice']:.4f} "
@@ -99,7 +110,13 @@ def train_fold(fold_idx: int, train_ids: list, val_ids: list, index_df: pd.DataF
 
         if val_metrics["dice"] > best_val_dice:
             best_val_dice = val_metrics["dice"]
+            epochs_no_improve = 0
             torch.save(model.state_dict(), checkpoint_dir / f"fold{fold_idx}_best.pt")
+        else:
+            epochs_no_improve += 1
+            if not smoke and epochs_no_improve >= early_stop_patience:
+                print(f"[fold {fold_idx}] early stopping at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
+                break
 
     history_path = checkpoint_dir / f"fold{fold_idx}_history.json"
     with open(history_path, "w") as f:
