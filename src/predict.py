@@ -170,9 +170,16 @@ def predict_patient(
 
 
 def _dice(pred: np.ndarray, gt: np.ndarray) -> float:
-    # pred: (Z, H, W); gt from NIfTI: (H, W, Z) — transpose to match
+    # pred: (Z, 256, 256); gt from NIfTI: (H, W, Z) native resolution
+    gt = np.moveaxis(gt, -1, 0)  # -> (Z, H, W)
     if gt.shape != pred.shape:
-        gt = np.moveaxis(gt, -1, 0)
+        # resize pred to native resolution for an apples-to-apples comparison
+        native_hw = gt.shape[1:]
+        pred = np.stack(
+            [sk_resize(pred[z], native_hw, order=0, preserve_range=True, anti_aliasing=False).astype(np.uint8)
+             for z in range(pred.shape[0])],
+            axis=0,
+        )
     intersection = (pred * gt).sum()
     denom = pred.sum() + gt.sum()
     return float(2 * intersection / denom) if denom > 0 else 1.0
@@ -219,6 +226,9 @@ def save_outputs(
             if row == 0:
                 axes[row, 0].set_title("MRI (FLAIR)")
 
+            native_hw = img_slice.shape[:2]
+            pred_native = sk_resize(pred_3d[z], native_hw, order=0, preserve_range=True, anti_aliasing=False).astype(np.uint8)
+
             col = 1
             if has_mask:
                 overlay_mask(axes[row, col], img_slice, gt_mask[:, :, z], color=(0, 1, 0))
@@ -226,7 +236,7 @@ def save_outputs(
                     axes[row, col].set_title("Ground truth")
                 col += 1
 
-            overlay_mask(axes[row, col], img_slice, pred_3d[z], color=(1, 0, 0))
+            overlay_mask(axes[row, col], img_slice, pred_native, color=(1, 0, 0))
             if row == 0:
                 axes[row, col].set_title("Prediction")
 
