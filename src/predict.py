@@ -170,6 +170,9 @@ def predict_patient(
 
 
 def _dice(pred: np.ndarray, gt: np.ndarray) -> float:
+    # pred: (Z, H, W); gt from NIfTI: (H, W, Z) — transpose to match
+    if gt.shape != pred.shape:
+        gt = np.moveaxis(gt, -1, 0)
     intersection = (pred * gt).sum()
     denom = pred.sum() + gt.sum()
     return float(2 * intersection / denom) if denom > 0 else 1.0
