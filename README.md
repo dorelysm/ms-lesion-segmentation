@@ -1,109 +1,65 @@
 # MS Lesion Segmentation
 
-2D U-Net study for multiple sclerosis lesion segmentation on brain MRI, using the Kaggle dataset
-[`orvile/multiple-sclerosis-brain-mri-lesion-segmentation`](https://www.kaggle.com/datasets/orvile/multiple-sclerosis-brain-mri-lesion-segmentation)
-(60 patients, T1/T2/FLAIR + consensus lesion masks, NIfTI format).
+A 2D U-Net that segments multiple sclerosis (MS) lesions in brain MRI (T1/T2/FLAIR), trained
+end-to-end on GPU with patient-level 5-fold cross-validation. MS is diagnosed and monitored largely
+through counting and tracking these lesions on MRI — manual segmentation is slow and has real
+inter-rater variability, which is the practical motivation for automating it.
+
+**Result**: Dice 0.553 ± 0.051 across 5 folds (60 patients). See
+[Results](#results) below and the full critical analysis in
+[`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb).
+
+> **This is a research/educational project, not a clinical tool.** It has not been validated
+> externally, was trained on a single 60-patient public dataset from ~20 centers, and should not be
+> used to inform any real diagnostic or treatment decision. See [Limitations](#limitations--future-work).
+
+## Results
+
+![Prediction examples: MRI slice, ground truth, and model prediction overlays](outputs/figures/prediction_examples.png)
+
+![Training and validation loss/Dice curves per fold](outputs/figures/training_curves.png)
+
+| Metric | Mean ± std (5-fold) |
+|---|---|
+| Dice | 0.553 ± 0.051 |
+| IoU | 0.433 ± 0.042 |
+| Sensitivity | 0.578 ± 0.040 |
+| Precision | 0.661 ± 0.027 |
 
 ## Project structure
 
 ```
 data/            raw NIfTI downloads and preprocessed 2D slices (gitignored)
 notebooks/       EDA, preprocessing dev, results report
-src/data/        download + preprocessing + PyTorch Dataset/split
+src/data/        download + preprocessing (N4 bias correction, resampling) + PyTorch Dataset/split
 src/models/      2D U-Net
 src/utils/       metrics (Dice/IoU/sensitivity/precision) and visualization
 src/train.py     training loop (config-driven, device-agnostic)
 src/evaluate.py  cross-fold evaluation + prediction figures
 configs/         hyperparameters (baseline.yaml)
 outputs/         checkpoints (gitignored) and figures (versioned)
+docs/            GPU setup details (AMD ROCm / NVIDIA CUDA)
 .kaggle/         project-local Kaggle API token (gitignored, see below)
 ```
 
-## GPU setup (AMD ROCm on Windows)
+## Quickstart
 
-This project trains on an **AMD Radeon RX 9060 XT** via AMD's official "PyTorch on Windows"
-ROCm 7.2.1 build, which preserves the standard `torch.cuda` API (`train.py`/`evaluate.py`
-need no code changes to use the GPU — they already do
-`torch.device("cuda" if torch.cuda.is_available() else "cpu")`).
-
-Requirements:
-- **Python 3.12** exactly (the ROCm wheels are built for `cp312`; other Python versions won't work).
-- **AMD graphics driver 26.2.2+** (check via Windows Settings → About, or the AMD Software / Adrenalin app).
-- **Visual Studio Build Tools**, "Desktop development with C++" workload + a Windows SDK — MIOpen's
-  HIPRTC JIT kernel compiler needs the MSVC standard library headers on Windows. Without this, GPU ops
-  like `BatchNorm` fail with `miopenStatusUnknownError` / `'type_traits' file not found`. Install via:
-  ```
-  # download https://aka.ms/vs/17/release/vs_buildtools.exe, then:
-  vs_buildtools.exe --quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended
-  ```
-
-Environment setup:
-```powershell
-py -3.12 -m venv .venv-rocm
-.venv-rocm\Scripts\activate        # Windows
-
-# ROCm SDK (~1.4 GB)
-pip install --no-cache-dir `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz
-
-# PyTorch/torchvision/torchaudio with ROCm support (~823 MB) -- do this BEFORE `pip install -r requirements.txt`,
-# since the plain `torch`/`torchvision` entries there would otherwise install CPU-only wheels over these.
-pip install --no-cache-dir `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl `
-    https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl
-
+```
+python -m venv .venv-rocm   # or .venv -- see docs/SETUP_GPU.md for GPU-specific setup (AMD ROCm / NVIDIA)
+.venv-rocm\Scripts\activate
 pip install -r requirements.txt
-```
 
-Verify:
-```
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-# -> True, AMD Radeon RX 9060 XT
-```
-
-Other AMD Windows GPUs (RX 7000/9000 series) supported by the same ROCm 7.2.1 build should work the
-same way — check AMD's [Windows compatibility matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html)
-for your card. On a machine with an **NVIDIA GPU** instead, skip this whole section and just
-`pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121` (or the current
-CUDA index) before `pip install -r requirements.txt` — the rest of the pipeline is unchanged either way.
-
-Without any GPU, everything still runs on CPU (`--smoke-test` is fast enough for that); a full 5-fold
-real run is only practical with a GPU.
-
-## Kaggle API credentials
-
-`src/data/download.py` uses the `kaggle` CLI (v2.x), which needs an API token. Kaggle's current token
-format (`KGAT_...`) is read from an `access_token` file, resolved via `KAGGLE_CONFIG_DIR` (defaults to
-`~/.kaggle`).
-
-This repo scopes it to the project instead of your global `~/.kaggle`: `.venv-rocm\Scripts\Activate.ps1`
-sets `KAGGLE_CONFIG_DIR` to `<project root>\.kaggle` automatically on activation.
-
-1. Go to your Kaggle account → Settings → API → **Create New Token**.
-2. Save the token value into `.kaggle/access_token` at the project root (create the folder if needed):
-   ```
-   echo YOUR_TOKEN > .kaggle/access_token
-   ```
-3. Never commit this file — `.kaggle/` is already in `.gitignore`.
-
-(The classic `kaggle.json` with `KAGGLE_USERNAME`/`KAGGLE_KEY` still works too, if you have one from an
-older token.)
-
-## Running the pipeline
-
-```
 python src/data/download.py                        # -> data/raw/
 python src/data/preprocessing.py                    # -> data/processed/ (2D slices + index.csv)
 python src/train.py --config configs/baseline.yaml  # -> outputs/checkpoints/
 python src/evaluate.py --config configs/baseline.yaml  # -> outputs/figures/
 ```
 
+**GPU setup** (required for a full run in reasonable time) is hardware-specific — see
+[`docs/SETUP_GPU.md`](docs/SETUP_GPU.md) for AMD ROCm (what this project used) and NVIDIA CUDA
+instructions. Without a GPU, everything still runs on CPU via the smoke test below.
+
 `configs/baseline.yaml` runs the full 5-fold cross-validation by default (`folds_to_run: [0,1,2,3,4]`).
-Set it back to e.g. `[0]` for a single-fold run.
 
 `preprocessing.py` options (all optional):
 - `--skip-bias-correction` — skip N4 bias field correction (faster; useful for smoke tests).
@@ -120,34 +76,67 @@ python src/train.py --config configs/baseline.yaml --smoke-test
 python src/evaluate.py --config configs/baseline.yaml --smoke-test
 ```
 
-Runs on 4 patients / 2 epochs to validate the full pipeline runs end-to-end before launching a real run.
+Runs on 4 patients / 2 epochs to validate the full pipeline end-to-end before launching a real run.
+
+## Kaggle API credentials
+
+`src/data/download.py` uses the `kaggle` CLI (v2.x), which needs an API token. Kaggle's current token
+format (`KGAT_...`) is read from an `access_token` file, resolved via `KAGGLE_CONFIG_DIR` (defaults to
+`~/.kaggle`).
+
+This repo scopes it to the project instead of your global `~/.kaggle`:
+`.venv-rocm\Scripts\Activate.ps1` sets `KAGGLE_CONFIG_DIR` to `<project root>\.kaggle` automatically
+on activation.
+
+1. Go to your Kaggle account → Settings → API → **Create New Token**.
+2. Save the token value into `.kaggle/access_token` at the project root (create the folder if needed):
+   ```
+   echo YOUR_TOKEN > .kaggle/access_token
+   ```
+3. Never commit this file — `.kaggle/` is already in `.gitignore`.
+
+(The classic `kaggle.json` with `KAGGLE_USERNAME`/`KAGGLE_KEY` still works too, if you have one from an
+older token.)
 
 ## Notebooks
 
 - `01_eda.ipynb` — inspect volumes, visualize modalities + lesion masks, lesion burden distribution.
 - `02_preprocessing_dev.ipynb` — debug preprocessing on 2-3 patients before running it on all 60.
-- `03_results_report.ipynb` — training curves, metrics table, prediction overlays, critical analysis
-  of results, and prioritized future-improvement notes.
+- `03_results_report.ipynb` — training curves, metrics table, prediction overlays, **critical
+  analysis of results, and prioritized future-improvement notes** (start here for the full story
+  behind the headline numbers).
 
 ## Method notes
 
 - **Task**: 2D axial-slice binary segmentation (lesion vs. background) with a from-scratch U-Net.
 - **Modalities**: T1/T2/FLAIR are *not* co-registered in this dataset (each has its own native
-  resolution/slice count per patient) — `preprocessing.py` N4-corrects each modality in its own space,
-  then resamples onto the reference (FLAIR) grid via `scipy.ndimage.zoom` (a proportional approximation,
-  not true anatomical registration).
+  resolution/slice count per patient) — `preprocessing.py` N4-corrects each modality in its own
+  space (`SimpleITK`), then resamples onto the reference (FLAIR) grid via `scipy.ndimage.zoom` (a
+  proportional approximation, not true anatomical registration).
+- **Class balance**: lesion pixels are a small minority even within lesion-containing slices;
+  `preprocessing.py` caps lesion-free slices per patient to reduce slice-level imbalance, and
+  training uses a combined Dice + BCE loss.
 - **Split**: patient-level k-fold (default 5-fold) — slices from the same patient never span
   train/val within a fold, enforced by an assertion in `src/data/dataset.py`.
-- **Loss**: combined Dice + BCE, standard for imbalanced medical segmentation.
 - **Metrics**: Dice, IoU, sensitivity, precision, reported per fold and as mean ± std across folds.
 
-## Current results
+## Limitations & future work
 
-Full 5-fold run on GPU (see `notebooks/03_results_report.ipynb` for the full critical analysis):
+Full analysis with numbers in [`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb):
 
-| Metric | Mean ± std |
-|---|---|
-| Dice | 0.553 ± 0.051 |
-| IoU | 0.433 ± 0.042 |
-| Sensitivity | 0.578 ± 0.040 |
-| Precision | 0.661 ± 0.027 |
+- Fold-to-fold variance is still the main source of uncertainty, not fully explained by data alone.
+- Pixel-level lesion prevalence is ~0.35% even in lesion-containing slices — an imbalance-aware loss
+  (focal/Tversky) is the most promising next lever, especially for sensitivity.
+- The modality resampling is an approximation; true anatomical registration (SimpleITK/ANTs) is the
+  single change most likely to reduce noise further.
+- No held-out test set outside the 5-fold CV, and no external multi-center validation yet.
+- 2D per-slice segmentation ignores inter-slice continuity; 2.5D/3D is a natural next step.
+
+## Dataset & license
+
+Trained on [`orvile/multiple-sclerosis-brain-mri-lesion-segmentation`](https://www.kaggle.com/datasets/orvile/multiple-sclerosis-brain-mri-lesion-segmentation)
+(Kaggle), 60 patients, T1/T2/FLAIR + consensus lesion masks from ~20 centers, licensed
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The dataset itself is not redistributed
+in this repo (`data/` is gitignored) — download it yourself via `src/data/download.py`.
+
+Code in this repository is licensed under the [MIT License](LICENSE).
