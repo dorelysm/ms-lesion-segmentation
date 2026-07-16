@@ -7,12 +7,14 @@ files are matched by keyword rather than a fixed filename.
 """
 
 import argparse
+import random
 import re
 from pathlib import Path
 
 import nibabel as nib
 import numpy as np
 import pandas as pd
+import SimpleITK as sitk
 from scipy.ndimage import zoom as nd_zoom
 from skimage.transform import resize as sk_resize
 
@@ -81,10 +83,37 @@ def _find_mask_file(patient_dir: Path, reference_modality: str) -> Path | None:
     return sorted(candidates)[0]
 
 
+def _n4_bias_correct(volume: np.ndarray, shrink_factor: int = 4) -> np.ndarray:
+    """Correct MRI intensity inhomogeneity (bias field) with N4ITK.
+
+    Runs on a shrunk copy for speed (standard N4 usage), then reconstructs the
+    full-resolution corrected volume from the estimated log bias field. Uses
+    nonzero voxels as the foreground mask, since these volumes are already
+    background-zeroed. Background stays at zero.
+    """
+    image = sitk.GetImageFromArray(volume.astype(np.float32))
+    mask = sitk.GetImageFromArray((volume > 0).astype(np.uint8))
+    if not sitk.GetArrayFromImage(mask).any():
+        return volume
+
+    image_ds = sitk.Shrink(image, [shrink_factor] * image.GetDimension())
+    mask_ds = sitk.Shrink(mask, [shrink_factor] * image.GetDimension())
+
+    corrector = sitk.N4BiasFieldCorrectionImageFilter()
+    corrector.Execute(image_ds, mask_ds)
+
+    log_bias_field = corrector.GetLogBiasFieldAsImage(image)
+    corrected = image / sitk.Exp(log_bias_field)
+    corrected_array = sitk.GetArrayFromImage(corrected).astype(np.float32)
+    corrected_array[volume <= 0] = 0
+    return corrected_array
+
+
 def load_patient_volumes(
     patient_dir: Path,
     modalities: list[str] | None = None,
     reference_modality: str = REFERENCE_MODALITY,
+    bias_correct: bool = True,
 ) -> dict[str, np.ndarray]:
     """Load each requested modality volume plus a consensus lesion mask.
 
@@ -94,6 +123,9 @@ def load_patient_volumes(
     trilinear) onto the reference modality's grid -- which is also the space
     the lesion mask is provided in. This is an approximation (proportional
     resampling, not true anatomical registration).
+
+    Each modality is N4 bias-field-corrected in its own native resolution
+    (before resampling) unless `bias_correct=False`.
     """
     modalities = modalities or list(MODALITY_KEYWORDS.keys())
     reference_modality = reference_modality if reference_modality in modalities else modalities[0]
@@ -103,7 +135,10 @@ def load_patient_volumes(
         path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
         if path is None:
             raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
-        raw_volumes[modality] = np.asarray(nib.load(str(path)).dataobj, dtype=np.float32)
+        volume = np.asarray(nib.load(str(path)).dataobj, dtype=np.float32)
+        if bias_correct:
+            volume = _n4_bias_correct(volume)
+        raw_volumes[modality] = volume
 
     mask_path = _find_mask_file(patient_dir, reference_modality)
     if mask_path is None:
@@ -141,13 +176,26 @@ def extract_patient_slices(
     modalities: list[str],
     image_size: int,
     min_brain_pixels: int = 100,
+    neg_ratio: float | None = 1.5,
+    rng: random.Random | None = None,
 ) -> list[dict]:
+    """Extract 2D axial slices for one patient.
+
+    `neg_ratio` caps how many lesion-free brain slices are kept per patient,
+    as a multiple of that patient's lesion-containing slice count (e.g. 1.5
+    keeps at most 1.5x as many empty slices as lesion slices, randomly
+    sampled). Only ~54% of brain slices in this dataset contain any lesion
+    pixel, and lesion pixels are a tiny fraction even within those -- capping
+    the empty-slice majority reduces that imbalance at the dataset level.
+    Set neg_ratio=None to keep every brain slice (previous behaviour).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+    rng = rng or random.Random()
     n_slices = volumes[modalities[0]].shape[2]
-    records = []
 
     normalized = {m: normalize_volume(volumes[m]) for m in modalities}
 
+    candidates = []
     for z in range(n_slices):
         stack = np.stack([normalized[m][:, :, z] for m in modalities], axis=0)  # (C, H, W)
         mask_slice = volumes["mask"][:, :, z]
@@ -155,6 +203,17 @@ def extract_patient_slices(
         if np.count_nonzero(stack[0]) < min_brain_pixels:
             continue  # skip empty (no-brain) slices
 
+        candidates.append((z, stack, mask_slice, bool(mask_slice.sum() > 0)))
+
+    positive = [c for c in candidates if c[3]]
+    negative = [c for c in candidates if not c[3]]
+    if neg_ratio is not None and negative:
+        n_keep = min(len(negative), round(len(positive) * neg_ratio))
+        negative = rng.sample(negative, n_keep)
+    selected = sorted(positive + negative, key=lambda c: c[0])
+
+    records = []
+    for z, stack, mask_slice, _ in selected:
         stack_resized = np.stack(
             [sk_resize(c, (image_size, image_size), preserve_range=True, anti_aliasing=True) for c in stack],
             axis=0,
@@ -186,6 +245,9 @@ def run(
     modalities: list[str] | None = None,
     image_size: int = 256,
     patient_limit: int | None = None,
+    bias_correct: bool = True,
+    neg_ratio: float | None = 1.5,
+    seed: int = 42,
 ) -> pd.DataFrame:
     modalities = modalities or ["t1", "t2", "flair"]
     patient_dirs = discover_patients(raw_dir)
@@ -196,12 +258,15 @@ def run(
     if patient_limit:
         patient_dirs = patient_dirs[:patient_limit]
 
+    rng = random.Random(seed)
     all_records = []
     for patient_dir in patient_dirs:
         patient_id = patient_id_from_dir(patient_dir)
         print(f"Processing patient {patient_id} ({patient_dir}) ...")
-        volumes = load_patient_volumes(patient_dir, modalities)
-        records = extract_patient_slices(patient_id, volumes, out_dir, modalities, image_size)
+        volumes = load_patient_volumes(patient_dir, modalities, bias_correct=bias_correct)
+        records = extract_patient_slices(
+            patient_id, volumes, out_dir, modalities, image_size, neg_ratio=neg_ratio, rng=rng
+        )
         all_records.extend(records)
         print(f"  -> {len(records)} slices ({sum(r['has_lesion'] for r in records)} with lesion)")
 
@@ -219,5 +284,28 @@ if __name__ == "__main__":
     parser.add_argument("--modalities", nargs="+", default=["t1", "t2", "flair"])
     parser.add_argument("--image-size", type=int, default=256)
     parser.add_argument("--patient-limit", type=int, default=None, help="For smoke tests.")
+    parser.add_argument(
+        "--skip-bias-correction",
+        action="store_true",
+        help="Skip N4 bias field correction (faster, e.g. for smoke tests).",
+    )
+    parser.add_argument(
+        "--neg-ratio",
+        type=float,
+        default=1.5,
+        help="Max lesion-free slices to keep per patient, as a multiple of that "
+        "patient's lesion-containing slice count. Use a negative value (e.g. -1) "
+        "to keep every brain slice (no balancing).",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Seed for empty-slice subsampling.")
     args = parser.parse_args()
-    run(args.raw_dir, args.out_dir, args.modalities, args.image_size, args.patient_limit)
+    run(
+        args.raw_dir,
+        args.out_dir,
+        args.modalities,
+        args.image_size,
+        args.patient_limit,
+        bias_correct=not args.skip_bias_correction,
+        neg_ratio=None if args.neg_ratio < 0 else args.neg_ratio,
+        seed=args.seed,
+    )

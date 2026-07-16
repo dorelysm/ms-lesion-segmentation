@@ -1,6 +1,7 @@
 torch>=2.2
 torchvision>=0.17
 nibabel>=5.2
+SimpleITK>=2.3
 numpy>=1.26
 scikit-learn>=1.4
 scikit-image>=0.22
