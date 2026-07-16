@@ -98,6 +98,38 @@ on activation.
 (The classic `kaggle.json` with `KAGGLE_USERNAME`/`KAGGLE_KEY` still works too, if you have one from an
 older token.)
 
+## Inference on a new patient
+
+Once you have trained checkpoints (`outputs/checkpoints/fold{0-4}_best.pt`), you can run the model
+on any patient folder that contains T1, T2, and FLAIR NIfTI files:
+
+```
+# Ensemble of all 5 folds (recommended — soft probability average before thresholding)
+python src/predict.py \
+  --patient-dir data/raw/patient_001 \
+  --config configs/baseline.yaml \
+  --ensemble \
+  --out-dir outputs/predictions/patient_001/
+
+# Single checkpoint
+python src/predict.py \
+  --patient-dir data/raw/patient_001 \
+  --checkpoint outputs/checkpoints/fold0_best.pt
+
+# Skip N4 bias correction for a quick test
+python src/predict.py --patient-dir data/raw/patient_001 --ensemble --skip-bias-correction
+```
+
+Outputs written to `--out-dir`:
+- `pred_mask.nii.gz` — 3D binary lesion mask in the FLAIR-resampled space
+- `overlay.png` — grid of lesion-positive slices with prediction overlay in red
+  (3-column with ground-truth overlay if a mask file is found, 2-column otherwise)
+- `summary.json` — slice counts, total lesion voxels, Dice (only if ground-truth mask present)
+
+The script applies the same N4 bias correction and FLAIR-space resampling as the training
+preprocessing. If no ground-truth mask is found in the patient folder, it runs in
+prediction-only mode without computing Dice.
+
 ## Notebooks
 
 - `01_eda.ipynb` — inspect volumes, visualize modalities + lesion masks, lesion burden distribution.
