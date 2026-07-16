@@ -13,6 +13,7 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 import pandas as pd
+from scipy.ndimage import zoom as nd_zoom
 from skimage.transform import resize as sk_resize
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +26,12 @@ MODALITY_KEYWORDS = {
     "flair": ["flair"],
 }
 MASK_KEYWORDS = ["mask", "consensus", "lesion", "gt", "label", "seg"]
+
+# T1/T2/FLAIR are not co-registered in this dataset -- each modality has its own
+# native resolution and slice count per patient. The lesion mask is provided
+# per-modality-space; we treat the reference modality's space as the common grid
+# and resample the other modalities onto it (see load_patient_volumes).
+REFERENCE_MODALITY = "flair"
 
 NIFTI_SUFFIXES = (".nii", ".nii.gz")
 
@@ -57,17 +64,61 @@ def patient_id_from_dir(patient_dir: Path) -> str:
     return match.group(1).zfill(3) if match else patient_dir.name
 
 
-def load_patient_volumes(patient_dir: Path) -> dict[str, np.ndarray]:
-    mask_path = _find_file(patient_dir, MASK_KEYWORDS)
-    volumes: dict[str, np.ndarray] = {}
-    for modality, keywords in MODALITY_KEYWORDS.items():
-        path = _find_file(patient_dir, keywords, exclude=MASK_KEYWORDS)
+def _find_mask_file(patient_dir: Path, reference_modality: str) -> Path | None:
+    """Find the lesion mask registered to `reference_modality`'s native space
+    (mask filenames embed the modality they were resampled to, e.g. LesionSeg-Flair)."""
+    ref_keywords = MODALITY_KEYWORDS.get(reference_modality, [reference_modality])
+    candidates = [
+        p
+        for p in patient_dir.rglob("*")
+        if p.is_file()
+        and p.name.lower().endswith(NIFTI_SUFFIXES)
+        and any(k in p.name.lower() for k in MASK_KEYWORDS)
+        and any(k in p.name.lower() for k in ref_keywords)
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates)[0]
+
+
+def load_patient_volumes(
+    patient_dir: Path,
+    modalities: list[str] | None = None,
+    reference_modality: str = REFERENCE_MODALITY,
+) -> dict[str, np.ndarray]:
+    """Load each requested modality volume plus a consensus lesion mask.
+
+    T1/T2/FLAIR are each acquired/stored at their own native resolution and
+    slice count in this dataset (not mutually co-registered), so every
+    modality other than `reference_modality` is resampled (scipy.ndimage.zoom,
+    trilinear) onto the reference modality's grid -- which is also the space
+    the lesion mask is provided in. This is an approximation (proportional
+    resampling, not true anatomical registration).
+    """
+    modalities = modalities or list(MODALITY_KEYWORDS.keys())
+    reference_modality = reference_modality if reference_modality in modalities else modalities[0]
+
+    raw_volumes: dict[str, np.ndarray] = {}
+    for modality in modalities:
+        path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
         if path is None:
             raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
-        volumes[modality] = np.asarray(nib.load(str(path)).dataobj, dtype=np.float32)
+        raw_volumes[modality] = np.asarray(nib.load(str(path)).dataobj, dtype=np.float32)
+
+    mask_path = _find_mask_file(patient_dir, reference_modality)
     if mask_path is None:
         raise FileNotFoundError(f"Could not find lesion mask in {patient_dir}")
-    volumes["mask"] = (np.asarray(nib.load(str(mask_path)).dataobj) > 0).astype(np.uint8)
+    mask = (np.asarray(nib.load(str(mask_path)).dataobj) > 0).astype(np.uint8)
+
+    target_shape = raw_volumes[reference_modality].shape
+    volumes: dict[str, np.ndarray] = {}
+    for modality, volume in raw_volumes.items():
+        if volume.shape == target_shape:
+            volumes[modality] = volume
+        else:
+            zoom_factors = [t / s for t, s in zip(target_shape, volume.shape)]
+            volumes[modality] = nd_zoom(volume, zoom_factors, order=1)
+    volumes["mask"] = mask
     return volumes
 
 
@@ -149,7 +200,7 @@ def run(
     for patient_dir in patient_dirs:
         patient_id = patient_id_from_dir(patient_dir)
         print(f"Processing patient {patient_id} ({patient_dir}) ...")
-        volumes = load_patient_volumes(patient_dir)
+        volumes = load_patient_volumes(patient_dir, modalities)
         records = extract_patient_slices(patient_id, volumes, out_dir, modalities, image_size)
         all_records.extend(records)
         print(f"  -> {len(records)} slices ({sum(r['has_lesion'] for r in records)} with lesion)")

@@ -21,22 +21,22 @@ def download(raw_dir: Path = DEFAULT_RAW_DIR, force: bool = False) -> None:
         print(f"{raw_dir} is not empty, skipping download (use --force to re-download).")
         return
 
-    zip_path = raw_dir / "dataset.zip"
-    print(f"Downloading {DATASET_SLUG} to {zip_path} ...")
+    print(f"Downloading {DATASET_SLUG} to {raw_dir} ...")
     subprocess.run(
         [
             "kaggle",
             "datasets",
             "download",
-            "-d",
             DATASET_SLUG,
             "-p",
             str(raw_dir),
-            "--force" if force else "--skip",
-        ],
+        ]
+        + (["-o"] if force else []),
         check=True,
     )
 
+    # The kaggle CLI names the downloaded archive after the dataset slug, not a fixed name.
+    zip_path = next(raw_dir.glob("*.zip"))
     print(f"Extracting {zip_path} ...")
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(raw_dir)

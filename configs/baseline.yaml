@@ -9,7 +9,7 @@ data:
 split:
   n_folds: 5
   seed: 42
-  folds_to_run: [0]              # which fold indices to train; e.g. [0,1,2,3,4] for full CV
+  folds_to_run: [0, 1, 2, 3, 4]   # which fold indices to train; e.g. [0,1,2,3,4] for full CV
 
 model:
   base_channels: 32

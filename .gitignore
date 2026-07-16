@@ -9,6 +9,7 @@ outputs/checkpoints/
 
 # Kaggle credentials (never commit)
 kaggle.json
+.kaggle/
 
 # Python
 __pycache__/
@@ -18,6 +19,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv-rocm/
 venv/
 env/
 
