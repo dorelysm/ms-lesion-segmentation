@@ -4,6 +4,7 @@ data/processed/
 
 # Model artifacts
 outputs/checkpoints/
+outputs/predictions/
 *.pt
 *.pth
 
