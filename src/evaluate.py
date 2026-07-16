@@ -57,11 +57,13 @@ def evaluate_fold(fold_idx: int, val_ids: list, index_df: pd.DataFrame, cfg: dic
             n_batches += 1
 
             if sample_batch is None:
-                sample_batch = {
-                    "images": images.cpu().numpy(),
-                    "gt": masks.cpu().numpy()[:, 0],
-                    "pred": (torch.sigmoid(logits) > 0.5).float().cpu().numpy()[:, 0],
-                }
+                gt_np = masks.cpu().numpy()[:, 0]
+                if gt_np.any():  # prefer a batch that contains at least one lesion slice
+                    sample_batch = {
+                        "images": images.cpu().numpy(),
+                        "gt": gt_np,
+                        "pred": (torch.sigmoid(logits) > 0.5).float().cpu().numpy()[:, 0],
+                    }
 
     avg_metrics = {k: v / n_batches for k, v in metric_sums.items()}
     return avg_metrics, sample_batch
