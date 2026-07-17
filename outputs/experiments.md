@@ -87,16 +87,42 @@ Std improved vs Exp 3 (0.056 vs 0.069). Fold 1 recovered to 0.481 (was 0.437 in 
 
 ---
 
+## Exp 5 — Registro anatómico real (SimpleITK rigid) + Tversky α=0.6
+**Date**: 2026-07-17  
+**Motivación**: El zoom proporcional (`scipy.ndimage.zoom`) no alinea anatómicamente las modalidades — un vóxel en [x,y,z] de FLAIR no corresponde al mismo tejido en T1/T2 tras el rescalado. El registro rígido con Mattes MI debería corregir este desalineamiento, reduciendo ruido de canal en todas las métricas.  
+**Cambio**: Reemplazar `nd_zoom` en `load_patient_volumes` por `_register_sitk` (SimpleITK Euler3D + Mattes MI, pirámide dinámica, NONE sampling, fallback geometry-only). Sin cambios en loss, arquitectura ni split. Commits: `e720b47`, `e315a2e`, `ff6b56e`.  
+**Config**: igual que Exp 4 (Tversky α=0.6, early stopping patience=15, ReduceLROnPlateau patience=5).  
+Early stopping epochs: fold0=48, fold1=31, fold2=53, fold3=37, fold4=33
+
+| Fold | Dice | IoU | Sensitivity | Precision |
+|------|------|-----|-------------|-----------|
+| 0 | 0.1432 | 0.1295 | 0.4304 | 0.4158 |
+| 1 | 0.1479 | 0.1356 | 0.3681 | 0.3785 |
+| 2 | 0.1613 | 0.1452 | 0.2675 | 0.3049 |
+| 3 | 0.0931 | 0.0780 | 0.2768 | 0.3842 |
+| 4 | 0.1137 | 0.0911 | 0.4573 | 0.1250 |
+| **Mean** | **0.132** | **0.116** | **0.360** | **0.322** |
+| **Std**  | **0.028** | **0.029** | **0.087** | **0.117** |
+
+**Key result**: Regresión severa — Dice 0.132 vs 0.551 en Exp 4 (−0.419). El registro, tal como está implementado, empeora drásticamente el rendimiento. 
+
+**Diagnóstico probable**:
+1. **Geometría NIfTI uniforme**: Todos los volúmenes de este dataset tienen `origin=(0,0,0)`, `spacing=(1,1,1,1)` y `direction=identity` en los headers NIfTI — es decir, no hay metadatos de posición real en el espacio del paciente. El inicializador por geometría centra los volúmenes en el mismo punto, y la optimización de MI sobre volúmenes con headers idénticos no tiene información posicional real que explotar. El registro termina produciendo alineaciones aleatorias o subóptimas (muchos folds hacen fallback geometry-only porque el optimizer diverge con pyrámide shrink=[1]).
+2. **FOV asimétrico**: T1 (512×512mm) se resamplea al grid de FLAIR (256×256mm), recortando la mitad del campo de visión de T1. Con zoom proporcional, toda la imagen escalaba suavemente; con registro+resample, se pierde información en el borde.
+3. **Pérdida de 2 pacientes**: Patients 5 y 11 producen 0 slices tras el registro (posiblemente por resampling fuera del FOV), dejando 58 pacientes (vs 60 en Exp 4).
+
+**Conclusión**: El registro anatómico real solo aporta valor cuando los headers NIfTI contienen coordenadas espaciales reales (posición del paciente en el escáner). En este dataset, los headers son sintéticos/vacíos — el zoom proporcional sigue siendo la mejor estrategia de resampling para este caso de uso.
+
+---
+
 ## Summary across experiments
 
-| Exp | Loss | alpha | Mean Dice | Std Dice | Mean Sensitivity | Mean Precision |
-|-----|------|-------|-----------|----------|------------------|----------------|
-| 1 | Dice+BCE | — | 0.553 | 0.051 | 0.578 | 0.661 |
-| 2 | Dice+BCE + N4 | — | 0.553 | 0.051 | 0.578 | 0.661 |
-| 3 | Tversky | 0.7 | 0.543 | 0.069 | 0.630 | 0.590 |
-| **4** | **Tversky** | **0.6** | **0.551** | **0.056** | **0.626** | **0.605** |
+| Exp | Loss | alpha | Preprocesamiento | Mean Dice | Std Dice | Mean Sensitivity | Mean Precision |
+|-----|------|-------|-----------------|-----------|----------|------------------|----------------|
+| 1 | Dice+BCE | — | zoom proporcional | 0.553 | 0.051 | 0.578 | 0.661 |
+| 2 | Dice+BCE + N4 | — | zoom proporcional | 0.553 | 0.051 | 0.578 | 0.661 |
+| 3 | Tversky | 0.7 | zoom proporcional | 0.543 | 0.069 | 0.630 | 0.590 |
+| **4** | **Tversky** | **0.6** | **zoom proporcional** | **0.551** | **0.056** | **0.626** | **0.605** |
+| 5 | Tversky | 0.6 | registro sitk rigid | 0.132 | 0.028 | 0.360 | 0.322 |
 
-**Takeaway**: Tversky(0.6) gives the best sensitivity/precision tradeoff. Dice is nearly identical
-to baseline but sensitivity is +0.048 — clinically relevant (fewer missed lesions).
-The persistent bottleneck is fold 1 (0.48 across all experiments); likely a data issue in that
-validation set rather than a modeling issue. Next lever: anatomical registration (Improvement #1).
+**Takeaway**: Exp 4 sigue siendo el mejor resultado. El registro anatómico (Exp 5) produce una regresión severa porque los headers NIfTI de este dataset no contienen coordenadas espaciales reales — el registro optimiza sobre información posicional inexistente. Revertir a zoom proporcional para cualquier iteración futura. Próximos levers: arquitectura 2.5D, augmentation más agresivo, o explorar el fold 1 (bottleneck persistente ≈0.48 en todos los experimentos con zoom).
