@@ -5,7 +5,7 @@ end-to-end on GPU with patient-level 5-fold cross-validation. MS is diagnosed an
 through counting and tracking these lesions on MRI — manual segmentation is slow and has real
 inter-rater variability, which is the practical motivation for automating it.
 
-**Result**: Dice 0.553 ± 0.051 across 5 folds (60 patients). See
+**Result**: Dice 0.551 ± 0.056, sensitivity 0.626 across 5 folds (60 patients). See
 [Results](#results) below and the full critical analysis in
 [`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb).
 
@@ -21,10 +21,14 @@ inter-rater variability, which is the practical motivation for automating it.
 
 | Metric | Mean ± std (5-fold) |
 |---|---|
-| Dice | 0.553 ± 0.051 |
-| IoU | 0.433 ± 0.042 |
-| Sensitivity | 0.578 ± 0.040 |
-| Precision | 0.661 ± 0.027 |
+| Dice | 0.551 ± 0.056 |
+| IoU | 0.428 ± 0.049 |
+| Sensitivity | 0.626 ± 0.034 |
+| Precision | 0.605 ± 0.066 |
+
+Best result from 4 training experiments (see [`outputs/experiments.md`](outputs/experiments.md)).
+Tversky loss (α=0.6) improved sensitivity by +0.048 vs the Dice+BCE baseline, at a small
+precision cost — fewer missed lesions, which matters more clinically.
 
 ## Project structure
 
