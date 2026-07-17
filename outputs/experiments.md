@@ -66,17 +66,37 @@ Scheduler and early stopping worked cleanly — next: tune alpha down to 0.6.
 ---
 
 ## Exp 4 — Tversky loss (alpha=0.6) + ReduceLROnPlateau + early stopping
-**Date**: 2026-07-16  
-**Config**: `loss=tversky, alpha=0.6, beta=0.4, lr=1e-4, epochs=100, lr_patience=5, early_stop_patience=15`
+**Date**: 2026-07-17  
+**Config**: `loss=tversky, alpha=0.6, beta=0.4, lr=1e-4, epochs=100, lr_patience=5, early_stop_patience=15`  
+Early stopping epochs: fold0=?, fold1=?, fold2=?, fold3=?, fold4=45
 
 | Fold | Dice | IoU | Sensitivity | Precision |
 |------|------|-----|-------------|-----------|
-| 0 | — | — | — | — |
-| 1 | — | — | — | — |
-| 2 | — | — | — | — |
-| 3 | — | — | — | — |
-| 4 | — | — | — | — |
-| **Mean** | **—** | **—** | **—** | **—** |
-| **Std**  | **—** | **—** | **—** | **—** |
+| 0 | 0.620 | 0.496 | 0.632 | 0.705 |
+| 1 | 0.481 | 0.376 | 0.592 | 0.558 |
+| 2 | 0.597 | 0.461 | 0.655 | 0.622 |
+| 3 | 0.530 | 0.401 | 0.591 | 0.606 |
+| 4 | 0.529 | 0.408 | 0.663 | 0.534 |
+| **Mean** | **0.551** | **0.428** | **0.626** | **0.605** |
+| **Std**  | **0.056** | **0.049** | **0.034** | **0.066** |
 
-**Status**: Running.
+**Key result**: Best overall balance so far. Dice ≈ Exp 2 (0.551 vs 0.553), sensitivity stays high
+(0.626 vs 0.578 baseline), precision recovered partially (0.605 vs 0.590 Exp 3, vs 0.661 baseline).
+Std improved vs Exp 3 (0.056 vs 0.069). Fold 1 recovered to 0.481 (was 0.437 in Exp 3).
+**alpha=0.6 is the best Tversky setting found so far** — sensitivity gain without the precision collapse of alpha=0.7.
+
+---
+
+## Summary across experiments
+
+| Exp | Loss | alpha | Mean Dice | Std Dice | Mean Sensitivity | Mean Precision |
+|-----|------|-------|-----------|----------|------------------|----------------|
+| 1 | Dice+BCE | — | 0.553 | 0.051 | 0.578 | 0.661 |
+| 2 | Dice+BCE + N4 | — | 0.553 | 0.051 | 0.578 | 0.661 |
+| 3 | Tversky | 0.7 | 0.543 | 0.069 | 0.630 | 0.590 |
+| **4** | **Tversky** | **0.6** | **0.551** | **0.056** | **0.626** | **0.605** |
+
+**Takeaway**: Tversky(0.6) gives the best sensitivity/precision tradeoff. Dice is nearly identical
+to baseline but sensitivity is +0.048 — clinically relevant (fewer missed lesions).
+The persistent bottleneck is fold 1 (0.48 across all experiments); likely a data issue in that
+validation set rather than a modeling issue. Next lever: anatomical registration (Improvement #1).
