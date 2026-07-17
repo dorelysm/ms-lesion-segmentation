@@ -33,12 +33,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import nibabel as _nib
 from scipy.ndimage import zoom as _nd_zoom
 
+import SimpleITK as sitk
+
 from src.data.preprocessing import (
     MODALITY_KEYWORDS,
     REFERENCE_MODALITY,
     _find_file,
-    _n4_bias_correct,
-    _register_to_reference,
+    _n4_bias_correct_sitk,
+    _register_sitk,
     load_patient_volumes,
     normalize_volume,
 )
@@ -87,29 +89,34 @@ def _resize_stack(stack: np.ndarray, image_size: int) -> np.ndarray:
 
 def _load_volumes_no_mask(patient_dir: Path, modalities: list, bias_correct: bool, register: bool = True) -> dict:
     """Load modality volumes without requiring a lesion mask (prediction-only mode)."""
-    raw: dict = {}
+    from src.data.preprocessing import MASK_KEYWORDS
+    raw_sitk: dict = {}
     for modality in modalities:
-        from src.data.preprocessing import MASK_KEYWORDS
         path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
         if path is None:
             raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
-        volume = np.asarray(_nib.load(str(path)).dataobj, dtype=np.float32)
+        img = sitk.ReadImage(str(path), sitk.sitkFloat32)
         if bias_correct:
-            volume = _n4_bias_correct(volume)
-        raw[modality] = volume
+            img = _n4_bias_correct_sitk(img)
+        raw_sitk[modality] = img
 
     ref_mod = REFERENCE_MODALITY if REFERENCE_MODALITY in modalities else modalities[0]
-    fixed = raw[ref_mod]
+    fixed_sitk = raw_sitk[ref_mod]
+    ref_arr = np.moveaxis(sitk.GetArrayFromImage(fixed_sitk).astype(np.float32), 0, -1)
+    fixed_shape_nib = ref_arr.shape  # (H, W, Z) in nibabel convention
+
     volumes: dict = {}
-    for modality, vol in raw.items():
-        if vol.shape == fixed.shape:
-            volumes[modality] = vol
+    for modality, img in raw_sitk.items():
+        if img.GetSize() == fixed_sitk.GetSize():
+            volumes[modality] = np.moveaxis(sitk.GetArrayFromImage(img).astype(np.float32), 0, -1)
         elif register:
-            volumes[modality] = _register_to_reference(vol, fixed)
+            resampled = _register_sitk(img, fixed_sitk)
+            volumes[modality] = np.moveaxis(sitk.GetArrayFromImage(resampled).astype(np.float32), 0, -1)
         else:
-            zoom_factors = [t / s for t, s in zip(fixed.shape, vol.shape)]
-            volumes[modality] = _nd_zoom(vol, zoom_factors, order=1)
-    volumes["mask"] = np.zeros(fixed.shape, dtype=np.uint8)
+            arr_nib = np.moveaxis(sitk.GetArrayFromImage(img).astype(np.float32), 0, -1)
+            zoom_factors = [t / s for t, s in zip(fixed_shape_nib, arr_nib.shape)]
+            volumes[modality] = _nd_zoom(arr_nib, zoom_factors, order=1)
+    volumes["mask"] = np.zeros(fixed_shape_nib, dtype=np.uint8)
     return volumes
 
 

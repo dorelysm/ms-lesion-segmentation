@@ -83,75 +83,52 @@ def _find_mask_file(patient_dir: Path, reference_modality: str) -> Path | None:
     return sorted(candidates)[0]
 
 
-def _register_to_reference(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
-    """Register `moving` volume onto `fixed` volume's grid using SimpleITK rigid registration.
+def _register_sitk(moving: sitk.Image, fixed: sitk.Image) -> sitk.Image:
+    """Register `moving` sitk.Image onto `fixed` sitk.Image's grid (rigid, Mattes MI).
 
-    Uses Mattes mutual information as the metric (appropriate for multi-modal MRI where
-    T1/T2/FLAIR have different contrast characteristics). Multi-resolution pyramid
-    (4→2→1) accelerates convergence and avoids local minima.
-
-    Both arrays are loaded without NIfTI spatial metadata (spacing/affine), so we assign
-    spacing to the moving image so that it spans the same physical extent as the fixed
-    image. This ensures the initial center-of-geometry alignment produces real overlap
-    before the optimizer starts.
-
-    Returns the resampled `moving` array in the same shape and space as `fixed`.
+    Reads spacing/origin/direction from the sitk images directly, which preserves
+    the full NIfTI spatial metadata (including different FOVs and origins across
+    modalities). Returns resampled moving image in the fixed image's grid.
     """
-    fixed_sitk = sitk.GetImageFromArray(fixed.astype(np.float32))
-
-    # Set moving image spacing so it occupies the same physical volume as fixed.
-    # Without real NIfTI spacing, this is the best initialisation we can do --
-    # it is equivalent to assuming both modalities cover the same FOV.
-    moving_sitk = sitk.GetImageFromArray(moving.astype(np.float32))
-    rel_spacing = [f / m for f, m in zip(fixed.shape, moving.shape)]
-    moving_sitk.SetSpacing(rel_spacing)
-
     initial_transform = sitk.CenteredTransformInitializer(
-        fixed_sitk,
-        moving_sitk,
+        fixed,
+        moving,
         sitk.Euler3DTransform(),
         sitk.CenteredTransformInitializerFilter.GEOMETRY,
     )
 
     registration = sitk.ImageRegistrationMethod()
     registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    registration.SetMetricSamplingStrategy(registration.RANDOM)
-    registration.SetMetricSamplingPercentage(0.05)
+    # NONE uses all voxels; RANDOM with small % fails when pyramid shrinks z to few slices
+    # and most samples land outside the moving image buffer.
+    registration.SetMetricSamplingStrategy(registration.NONE)
     registration.SetInterpolator(sitk.sitkLinear)
     registration.SetOptimizerAsGradientDescent(
         learningRate=1.0, numberOfIterations=100, convergenceWindowSize=10
     )
     registration.SetOptimizerScalesFromPhysicalShift()
-    registration.SetShrinkFactorsPerLevel([4, 2, 1])
-    registration.SetSmoothingSigmasPerLevel([2, 1, 0])
+    # Limit pyramid to 2 levels: avoid shrink=4 which leaves <5 z-slices and causes divergence.
+    registration.SetShrinkFactorsPerLevel([2, 1])
+    registration.SetSmoothingSigmasPerLevel([1, 0])
     registration.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration.SetInitialTransform(initial_transform, inPlace=False)
 
-    transform = registration.Execute(fixed_sitk, moving_sitk)
+    transform = registration.Execute(fixed, moving)
 
-    resampled = sitk.Resample(
-        moving_sitk,
-        fixed_sitk,
-        transform,
-        sitk.sitkLinear,
-        0.0,
-        moving_sitk.GetPixelID(),
-    )
-    return sitk.GetArrayFromImage(resampled).astype(np.float32)
+    return sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0.0, moving.GetPixelID())
 
 
-def _n4_bias_correct(volume: np.ndarray, shrink_factor: int = 4) -> np.ndarray:
-    """Correct MRI intensity inhomogeneity (bias field) with N4ITK.
+def _n4_bias_correct_sitk(image: sitk.Image, shrink_factor: int = 4) -> sitk.Image:
+    """N4 bias field correction on a sitk.Image, preserving full spatial metadata.
 
-    Runs on a shrunk copy for speed (standard N4 usage), then reconstructs the
-    full-resolution corrected volume from the estimated log bias field. Uses
-    nonzero voxels as the foreground mask, since these volumes are already
-    background-zeroed. Background stays at zero.
+    Runs on a shrunk copy for speed, reconstructs the corrected full-resolution image
+    from the estimated log bias field. Uses nonzero voxels as the foreground mask.
     """
-    image = sitk.GetImageFromArray(volume.astype(np.float32))
-    mask = sitk.GetImageFromArray((volume > 0).astype(np.uint8))
-    if not sitk.GetArrayFromImage(mask).any():
-        return volume
+    array = sitk.GetArrayFromImage(image)
+    mask = sitk.GetImageFromArray((array > 0).astype(np.uint8))
+    mask.CopyInformation(image)
+    if not array.any():
+        return image
 
     image_ds = sitk.Shrink(image, [shrink_factor] * image.GetDimension())
     mask_ds = sitk.Shrink(mask, [shrink_factor] * image.GetDimension())
@@ -161,9 +138,24 @@ def _n4_bias_correct(volume: np.ndarray, shrink_factor: int = 4) -> np.ndarray:
 
     log_bias_field = corrector.GetLogBiasFieldAsImage(image)
     corrected = image / sitk.Exp(log_bias_field)
+
+    # Zero out background while keeping spatial metadata
     corrected_array = sitk.GetArrayFromImage(corrected).astype(np.float32)
-    corrected_array[volume <= 0] = 0
-    return corrected_array
+    corrected_array[array <= 0] = 0
+    corrected_sitk = sitk.GetImageFromArray(corrected_array)
+    corrected_sitk.CopyInformation(image)
+    return corrected_sitk
+
+
+def _n4_bias_correct(volume: np.ndarray, shrink_factor: int = 4) -> np.ndarray:
+    """Correct MRI intensity inhomogeneity (bias field) with N4ITK.
+
+    Wrapper around _n4_bias_correct_sitk for callers that work with numpy arrays
+    (no spatial metadata needed — internal use only when registration is skipped).
+    """
+    image = sitk.GetImageFromArray(volume.astype(np.float32))
+    corrected = _n4_bias_correct_sitk(image, shrink_factor)
+    return sitk.GetArrayFromImage(corrected).astype(np.float32)
 
 
 def load_patient_volumes(
@@ -190,31 +182,43 @@ def load_patient_volumes(
     modalities = modalities or list(MODALITY_KEYWORDS.keys())
     reference_modality = reference_modality if reference_modality in modalities else modalities[0]
 
-    raw_volumes: dict[str, np.ndarray] = {}
+    raw_sitk: dict[str, sitk.Image] = {}
     for modality in modalities:
         path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
         if path is None:
             raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
-        volume = np.asarray(nib.load(str(path)).dataobj, dtype=np.float32)
+        # ReadImage preserves spacing, origin, and direction cosines — required for correct
+        # inter-modality registration when FOVs or origins differ across modalities.
+        img = sitk.ReadImage(str(path), sitk.sitkFloat32)
         if bias_correct:
-            volume = _n4_bias_correct(volume)
-        raw_volumes[modality] = volume
+            img = _n4_bias_correct_sitk(img)
+        raw_sitk[modality] = img
 
     mask_path = _find_mask_file(patient_dir, reference_modality)
     if mask_path is None:
         raise FileNotFoundError(f"Could not find lesion mask in {patient_dir}")
     mask = (np.asarray(nib.load(str(mask_path)).dataobj) > 0).astype(np.uint8)
 
-    fixed = raw_volumes[reference_modality]
+    fixed_sitk = raw_sitk[reference_modality]
+    # sitk.GetArrayFromImage returns (Z, Y, X); convert to nibabel convention (X, Y, Z)
+    # so the rest of the pipeline can slice with volume[:, :, z] unchanged.
+    ref_arr = np.moveaxis(sitk.GetArrayFromImage(fixed_sitk).astype(np.float32), 0, -1)
+    fixed_shape_nib = ref_arr.shape  # (H, W, Z) in nibabel convention
+
     volumes: dict[str, np.ndarray] = {}
-    for modality, volume in raw_volumes.items():
-        if volume.shape == fixed.shape:
-            volumes[modality] = volume
+    for modality, img in raw_sitk.items():
+        if img.GetSize() == fixed_sitk.GetSize():
+            arr = sitk.GetArrayFromImage(img).astype(np.float32)
+            volumes[modality] = np.moveaxis(arr, 0, -1)
         elif register:
-            volumes[modality] = _register_to_reference(volume, fixed)
+            resampled = _register_sitk(img, fixed_sitk)
+            arr = sitk.GetArrayFromImage(resampled).astype(np.float32)
+            volumes[modality] = np.moveaxis(arr, 0, -1)
         else:
-            zoom_factors = [t / s for t, s in zip(fixed.shape, volume.shape)]
-            volumes[modality] = nd_zoom(volume, zoom_factors, order=1)
+            arr = sitk.GetArrayFromImage(img).astype(np.float32)
+            arr_nib = np.moveaxis(arr, 0, -1)  # (H, W, Z)
+            zoom_factors = [t / s for t, s in zip(fixed_shape_nib, arr_nib.shape)]
+            volumes[modality] = nd_zoom(arr_nib, zoom_factors, order=1)
     volumes["mask"] = mask
     return volumes
 
