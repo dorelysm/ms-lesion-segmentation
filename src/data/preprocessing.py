@@ -86,9 +86,13 @@ def _find_mask_file(patient_dir: Path, reference_modality: str) -> Path | None:
 def _register_sitk(moving: sitk.Image, fixed: sitk.Image) -> sitk.Image:
     """Register `moving` sitk.Image onto `fixed` sitk.Image's grid (rigid, Mattes MI).
 
-    Reads spacing/origin/direction from the sitk images directly, which preserves
-    the full NIfTI spatial metadata (including different FOVs and origins across
-    modalities). Returns resampled moving image in the fixed image's grid.
+    Reads spacing/origin/direction from the sitk images directly, preserving the full
+    NIfTI spatial metadata (including different FOVs and origins across modalities).
+
+    Pyramid depth is capped so the smallest z-extent (fixed or moving) is never shrunk
+    below 8 slices — smaller z-extents cause the optimizer to diverge and lose overlap
+    with the next pyramid level. Falls back to GEOMETRY-only resampling (no optimization)
+    if the MI metric still fails despite these precautions.
     """
     initial_transform = sitk.CenteredTransformInitializer(
         fixed,
@@ -97,23 +101,36 @@ def _register_sitk(moving: sitk.Image, fixed: sitk.Image) -> sitk.Image:
         sitk.CenteredTransformInitializerFilter.GEOMETRY,
     )
 
+    # Only use a multi-resolution pyramid when both images are large enough in z.
+    # Shrink=2 requires min_z >= 16 to keep >= 8 slices at the coarse level.
+    min_z = min(fixed.GetSize()[2], moving.GetSize()[2])
+    if min_z >= 16:
+        shrink_factors = [2, 1]
+        smooth_sigmas = [1, 0]
+    else:
+        shrink_factors = [1]
+        smooth_sigmas = [0]
+
     registration = sitk.ImageRegistrationMethod()
     registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    # NONE uses all voxels; RANDOM with small % fails when pyramid shrinks z to few slices
-    # and most samples land outside the moving image buffer.
     registration.SetMetricSamplingStrategy(registration.NONE)
     registration.SetInterpolator(sitk.sitkLinear)
     registration.SetOptimizerAsGradientDescent(
         learningRate=1.0, numberOfIterations=100, convergenceWindowSize=10
     )
     registration.SetOptimizerScalesFromPhysicalShift()
-    # Limit pyramid to 2 levels: avoid shrink=4 which leaves <5 z-slices and causes divergence.
-    registration.SetShrinkFactorsPerLevel([2, 1])
-    registration.SetSmoothingSigmasPerLevel([1, 0])
+    registration.SetShrinkFactorsPerLevel(shrink_factors)
+    registration.SetSmoothingSigmasPerLevel(smooth_sigmas)
     registration.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
     registration.SetInitialTransform(initial_transform, inPlace=False)
 
-    transform = registration.Execute(fixed, moving)
+    try:
+        transform = registration.Execute(fixed, moving)
+    except RuntimeError:
+        # Registration failed (e.g. extreme FOV mismatch with tiny z-extent).
+        # Fall back to the GEOMETRY initializer alone — center alignment without
+        # optimization. Better than zoom and preserves spatial metadata.
+        transform = initial_transform
 
     return sitk.Resample(moving, fixed, transform, sitk.sitkLinear, 0.0, moving.GetPixelID())
 
