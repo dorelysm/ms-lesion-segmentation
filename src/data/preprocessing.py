@@ -83,6 +83,63 @@ def _find_mask_file(patient_dir: Path, reference_modality: str) -> Path | None:
     return sorted(candidates)[0]
 
 
+def _register_to_reference(moving: np.ndarray, fixed: np.ndarray) -> np.ndarray:
+    """Register `moving` volume onto `fixed` volume's grid using SimpleITK rigid registration.
+
+    Uses Mattes mutual information as the metric (appropriate for multi-modal MRI where
+    T1/T2/FLAIR have different contrast characteristics). Multi-resolution pyramid
+    (4→2→1) accelerates convergence and avoids local minima.
+
+    Both arrays are loaded without NIfTI spatial metadata (spacing/affine), so we assign
+    spacing to the moving image so that it spans the same physical extent as the fixed
+    image. This ensures the initial center-of-geometry alignment produces real overlap
+    before the optimizer starts.
+
+    Returns the resampled `moving` array in the same shape and space as `fixed`.
+    """
+    fixed_sitk = sitk.GetImageFromArray(fixed.astype(np.float32))
+
+    # Set moving image spacing so it occupies the same physical volume as fixed.
+    # Without real NIfTI spacing, this is the best initialisation we can do --
+    # it is equivalent to assuming both modalities cover the same FOV.
+    moving_sitk = sitk.GetImageFromArray(moving.astype(np.float32))
+    rel_spacing = [f / m for f, m in zip(fixed.shape, moving.shape)]
+    moving_sitk.SetSpacing(rel_spacing)
+
+    initial_transform = sitk.CenteredTransformInitializer(
+        fixed_sitk,
+        moving_sitk,
+        sitk.Euler3DTransform(),
+        sitk.CenteredTransformInitializerFilter.GEOMETRY,
+    )
+
+    registration = sitk.ImageRegistrationMethod()
+    registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+    registration.SetMetricSamplingStrategy(registration.RANDOM)
+    registration.SetMetricSamplingPercentage(0.05)
+    registration.SetInterpolator(sitk.sitkLinear)
+    registration.SetOptimizerAsGradientDescent(
+        learningRate=1.0, numberOfIterations=100, convergenceWindowSize=10
+    )
+    registration.SetOptimizerScalesFromPhysicalShift()
+    registration.SetShrinkFactorsPerLevel([4, 2, 1])
+    registration.SetSmoothingSigmasPerLevel([2, 1, 0])
+    registration.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    registration.SetInitialTransform(initial_transform, inPlace=False)
+
+    transform = registration.Execute(fixed_sitk, moving_sitk)
+
+    resampled = sitk.Resample(
+        moving_sitk,
+        fixed_sitk,
+        transform,
+        sitk.sitkLinear,
+        0.0,
+        moving_sitk.GetPixelID(),
+    )
+    return sitk.GetArrayFromImage(resampled).astype(np.float32)
+
+
 def _n4_bias_correct(volume: np.ndarray, shrink_factor: int = 4) -> np.ndarray:
     """Correct MRI intensity inhomogeneity (bias field) with N4ITK.
 
@@ -114,18 +171,21 @@ def load_patient_volumes(
     modalities: list[str] | None = None,
     reference_modality: str = REFERENCE_MODALITY,
     bias_correct: bool = True,
+    register: bool = True,
 ) -> dict[str, np.ndarray]:
     """Load each requested modality volume plus a consensus lesion mask.
 
     T1/T2/FLAIR are each acquired/stored at their own native resolution and
     slice count in this dataset (not mutually co-registered), so every
-    modality other than `reference_modality` is resampled (scipy.ndimage.zoom,
-    trilinear) onto the reference modality's grid -- which is also the space
-    the lesion mask is provided in. This is an approximation (proportional
-    resampling, not true anatomical registration).
+    modality other than `reference_modality` is brought onto the reference
+    modality's grid.
+
+    When `register=True` (default), uses SimpleITK rigid registration with
+    Mattes mutual information -- true anatomical alignment. When `register=False`,
+    falls back to proportional scipy.ndimage.zoom (faster but approximate).
 
     Each modality is N4 bias-field-corrected in its own native resolution
-    (before resampling) unless `bias_correct=False`.
+    (before registration/resampling) unless `bias_correct=False`.
     """
     modalities = modalities or list(MODALITY_KEYWORDS.keys())
     reference_modality = reference_modality if reference_modality in modalities else modalities[0]
@@ -145,13 +205,15 @@ def load_patient_volumes(
         raise FileNotFoundError(f"Could not find lesion mask in {patient_dir}")
     mask = (np.asarray(nib.load(str(mask_path)).dataobj) > 0).astype(np.uint8)
 
-    target_shape = raw_volumes[reference_modality].shape
+    fixed = raw_volumes[reference_modality]
     volumes: dict[str, np.ndarray] = {}
     for modality, volume in raw_volumes.items():
-        if volume.shape == target_shape:
+        if volume.shape == fixed.shape:
             volumes[modality] = volume
+        elif register:
+            volumes[modality] = _register_to_reference(volume, fixed)
         else:
-            zoom_factors = [t / s for t, s in zip(target_shape, volume.shape)]
+            zoom_factors = [t / s for t, s in zip(fixed.shape, volume.shape)]
             volumes[modality] = nd_zoom(volume, zoom_factors, order=1)
     volumes["mask"] = mask
     return volumes
@@ -246,6 +308,7 @@ def run(
     image_size: int = 256,
     patient_limit: int | None = None,
     bias_correct: bool = True,
+    register: bool = True,
     neg_ratio: float | None = 1.5,
     seed: int = 42,
 ) -> pd.DataFrame:
@@ -263,7 +326,7 @@ def run(
     for patient_dir in patient_dirs:
         patient_id = patient_id_from_dir(patient_dir)
         print(f"Processing patient {patient_id} ({patient_dir}) ...")
-        volumes = load_patient_volumes(patient_dir, modalities, bias_correct=bias_correct)
+        volumes = load_patient_volumes(patient_dir, modalities, bias_correct=bias_correct, register=register)
         records = extract_patient_slices(
             patient_id, volumes, out_dir, modalities, image_size, neg_ratio=neg_ratio, rng=rng
         )
@@ -290,6 +353,11 @@ if __name__ == "__main__":
         help="Skip N4 bias field correction (faster, e.g. for smoke tests).",
     )
     parser.add_argument(
+        "--skip-registration",
+        action="store_true",
+        help="Use proportional zoom instead of SimpleITK rigid registration (faster, lower quality).",
+    )
+    parser.add_argument(
         "--neg-ratio",
         type=float,
         default=1.5,
@@ -306,6 +374,7 @@ if __name__ == "__main__":
         args.image_size,
         args.patient_limit,
         bias_correct=not args.skip_bias_correction,
+        register=not args.skip_registration,
         neg_ratio=None if args.neg_ratio < 0 else args.neg_ratio,
         seed=args.seed,
     )

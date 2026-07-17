@@ -67,6 +67,7 @@ instructions. Without a GPU, everything still runs on CPU via the smoke test bel
 
 `preprocessing.py` options (all optional):
 - `--skip-bias-correction` — skip N4 bias field correction (faster; useful for smoke tests).
+- `--skip-registration` — use proportional zoom instead of SimpleITK rigid registration (much faster; useful for smoke tests).
 - `--neg-ratio 1.5` — cap lesion-free slices per patient at this multiple of that patient's
   lesion-containing slice count (pass a negative value to disable and keep every brain slice).
 - `--seed 42` — seed for the empty-slice subsampling.
@@ -75,7 +76,7 @@ instructions. Without a GPU, everything still runs on CPU via the smoke test bel
 ### Smoke test (fast, CPU-friendly)
 
 ```
-python src/data/preprocessing.py --patient-limit 4 --skip-bias-correction
+python src/data/preprocessing.py --patient-limit 4 --skip-bias-correction --skip-registration
 python src/train.py --config configs/baseline.yaml --smoke-test
 python src/evaluate.py --config configs/baseline.yaml --smoke-test
 ```
@@ -147,8 +148,9 @@ prediction-only mode without computing Dice.
 - **Task**: 2D axial-slice binary segmentation (lesion vs. background) with a from-scratch U-Net.
 - **Modalities**: T1/T2/FLAIR are *not* co-registered in this dataset (each has its own native
   resolution/slice count per patient) — `preprocessing.py` N4-corrects each modality in its own
-  space (`SimpleITK`), then resamples onto the reference (FLAIR) grid via `scipy.ndimage.zoom` (a
-  proportional approximation, not true anatomical registration).
+  space, then registers T1/T2 onto the FLAIR grid via SimpleITK rigid registration (Euler3D
+  transform, Mattes mutual information metric, multi-resolution pyramid 4→2→1). Use
+  `--skip-registration` for fast smoke tests (falls back to proportional zoom).
 - **Class balance**: lesion pixels are a small minority even within lesion-containing slices;
   `preprocessing.py` caps lesion-free slices per patient to reduce slice-level imbalance, and
   training uses a combined Dice + BCE loss.

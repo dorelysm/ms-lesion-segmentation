@@ -5,6 +5,7 @@ data:
   index_csv: data/processed/index.csv
   modalities: [t1, t2, flair]   # determines model in_channels (len(modalities))
   image_size: 256
+  registration: rigid            # "rigid" = SimpleITK Euler3D + Mattes MI; "none" = proportional zoom fallback
 
 split:
   n_folds: 5

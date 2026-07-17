@@ -38,6 +38,7 @@ from src.data.preprocessing import (
     REFERENCE_MODALITY,
     _find_file,
     _n4_bias_correct,
+    _register_to_reference,
     load_patient_volumes,
     normalize_volume,
 )
@@ -84,7 +85,7 @@ def _resize_stack(stack: np.ndarray, image_size: int) -> np.ndarray:
     ).astype(np.float32)
 
 
-def _load_volumes_no_mask(patient_dir: Path, modalities: list, bias_correct: bool) -> dict:
+def _load_volumes_no_mask(patient_dir: Path, modalities: list, bias_correct: bool, register: bool = True) -> dict:
     """Load modality volumes without requiring a lesion mask (prediction-only mode)."""
     raw: dict = {}
     for modality in modalities:
@@ -98,15 +99,17 @@ def _load_volumes_no_mask(patient_dir: Path, modalities: list, bias_correct: boo
         raw[modality] = volume
 
     ref_mod = REFERENCE_MODALITY if REFERENCE_MODALITY in modalities else modalities[0]
-    ref_shape = raw[ref_mod].shape
+    fixed = raw[ref_mod]
     volumes: dict = {}
     for modality, vol in raw.items():
-        if vol.shape == ref_shape:
+        if vol.shape == fixed.shape:
             volumes[modality] = vol
+        elif register:
+            volumes[modality] = _register_to_reference(vol, fixed)
         else:
-            zoom_factors = [t / s for t, s in zip(ref_shape, vol.shape)]
+            zoom_factors = [t / s for t, s in zip(fixed.shape, vol.shape)]
             volumes[modality] = _nd_zoom(vol, zoom_factors, order=1)
-    volumes["mask"] = np.zeros(ref_shape, dtype=np.uint8)
+    volumes["mask"] = np.zeros(fixed.shape, dtype=np.uint8)
     return volumes
 
 
@@ -117,6 +120,7 @@ def predict_patient(
     device: torch.device,
     threshold: float,
     bias_correct: bool,
+    register: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Preprocess patient and run inference. Returns (pred_3d, prob_3d, volumes)."""
     modalities = cfg["data"]["modalities"]
@@ -124,12 +128,12 @@ def predict_patient(
 
     has_mask = True
     try:
-        volumes = load_patient_volumes(patient_dir, modalities, bias_correct=bias_correct)
+        volumes = load_patient_volumes(patient_dir, modalities, bias_correct=bias_correct, register=register)
     except FileNotFoundError as e:
         if "mask" in str(e).lower():
             print("  No ground-truth mask found — running in prediction-only mode.")
             has_mask = False
-            volumes = _load_volumes_no_mask(patient_dir, modalities, bias_correct)
+            volumes = _load_volumes_no_mask(patient_dir, modalities, bias_correct, register=register)
         else:
             raise
 
@@ -286,6 +290,7 @@ def main(args: argparse.Namespace) -> None:
         device,
         threshold=args.threshold,
         bias_correct=not args.skip_bias_correction,
+        register=not args.skip_registration,
     )
 
     out_dir = Path(args.out_dir)
@@ -303,6 +308,11 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", type=str, default=str(PROJECT_ROOT / "outputs" / "predictions"))
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--skip-bias-correction", action="store_true")
+    parser.add_argument(
+        "--skip-registration",
+        action="store_true",
+        help="Use proportional zoom instead of SimpleITK rigid registration (faster, lower quality).",
+    )
     args = parser.parse_args()
 
     if not args.ensemble and not args.checkpoint:
