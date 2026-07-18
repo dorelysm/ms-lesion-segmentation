@@ -26,9 +26,26 @@ inter-rater variability, which is the practical motivation for automating it.
 | Sensitivity | 0.626 ± 0.034 |
 | Precision | 0.605 ± 0.066 |
 
-Best result from 4 training experiments (see [`outputs/experiments.md`](outputs/experiments.md)).
-Tversky loss (α=0.6) improved sensitivity by +0.048 vs the Dice+BCE baseline, at a small
-precision cost — fewer missed lesions, which matters more clinically.
+Best result from 6 training experiments (see [`outputs/experiments.md`](outputs/experiments.md)).
+
+## What we found
+
+The best model (Exp 4) uses Tversky loss with α=0.6, which penalizes missed lesions more than false positives. This raised sensitivity by +0.048 over the baseline — meaning the model correctly identifies more of the actual lesion area — while keeping precision high enough to avoid flooding predictions with false alarms. Adding a learning rate scheduler and early stopping prevented overfitting and stabilized results across folds.
+
+**Two experiments that didn't work — and why they're interesting:**
+
+- *Anatomical registration* (Exp 5, Dice 0.132): replacing the simple image rescaling with proper 3D registration collapsed performance. The reason: this dataset's MRI files have placeholder coordinate headers (all zeros), so the registration optimizer had no real patient-space information to work with. Lesson: anatomical registration only helps when the NIfTI files contain real scanner coordinates.
+- *Intensity augmentation* (Exp 6, Dice 0.175): randomly distorting image contrast during training made things worse, not better. The distortion range was too wide — training images looked so different from validation images that the model learned the wrong thing. Lesson: data augmentation needs to stay close enough to the real distribution.
+
+**The persistent outlier (fold 1):** one validation fold consistently scores ~0.07 lower than the others. Investigation shows this fold happens to contain two patients with unusually tiny lesions (~4×5 pixel blobs at 256×256 resolution), which are near-impossible to detect reliably regardless of the model. This is a data split artifact, not a model failure.
+
+**Next steps (prioritized):**
+
+1. Intensity augmentation with conservative ranges (gamma ±10%, brightness ±5%) — same idea as Exp 6, but without the distribution mismatch that caused the regression.
+2. 2.5D architecture — feed adjacent slices as extra input channels to give the model spatial context across slices, which should help with small lesions that only appear in 1–2 consecutive slices.
+3. Stratified split — distribute the hard small-lesion patients evenly across folds so per-fold variance better reflects model quality rather than data luck.
+
+Full analysis with numbers in [`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb).
 
 ## Project structure
 
@@ -160,15 +177,13 @@ prediction-only mode without computing Dice.
 
 ## Limitations & future work
 
-Full analysis with numbers in [`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb):
+Full analysis in [`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb):
 
-- Fold-to-fold variance is still the main source of uncertainty, not fully explained by data alone.
-- Pixel-level lesion prevalence is ~0.35% even in lesion-containing slices — an imbalance-aware loss
-  (focal/Tversky) is the most promising next lever, especially for sensitivity.
-- The modality resampling is an approximation; true anatomical registration (SimpleITK/ANTs) is the
-  single change most likely to reduce noise further.
-- No held-out test set outside the 5-fold CV, and no external multi-center validation yet.
-- 2D per-slice segmentation ignores inter-slice continuity; 2.5D/3D is a natural next step.
+- n=60 patients from a single public dataset — no external validation on other institutions' data.
+- 2D per-slice segmentation ignores inter-slice context; lesions spanning only 1–2 slices are harder to detect consistently.
+- Smallest lesions (~4×5 pixels at 256×256) are near the detection limit of any standard conv model.
+- All metrics are from internal cross-validation; real-world Dice may differ.
+- No held-out test set outside the 5-fold CV.
 
 ## Dataset & license
 
