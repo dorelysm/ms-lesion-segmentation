@@ -115,14 +115,43 @@ Early stopping epochs: fold0=48, fold1=31, fold2=53, fold3=37, fold4=33
 
 ---
 
+## Exp 6 — Intensity augmentation (gamma jitter + brightness shift) + Tversky α=0.6
+**Date**: 2026-07-18  
+**Motivación**: El diagnóstico de fold 1 (Dice persistente ≈0.48) identificó que el val set del fold 1 contiene 2 pacientes con lesiones microscópicas (mediana ~17–19 vóxeles a 256×256). La hipótesis era que añadir jitter de intensidad —gamma U[0.7, 1.5] y brightness shift U[−0.2, 0.2]— forzaría al modelo a detectar la señal de lesión independientemente del nivel de contraste absoluto, mejorando la generalización entre scanners.  
+**Cambio**: Añadir dos bloques al final de `_augment` en `src/data/dataset.py`: `sign(x)*|x|^gamma` para manejar valores negativos (z-score), y shift aditivo por imagen. Sin cambios en arquitectura, loss, split, ni preprocessing.  
+**Config**: `configs/exp6_intensity_aug.yaml` — igual que Exp 4 excepto `epochs=200`, `early_stop_patience=30` (extended para descartar problema de convergencia lenta).  
+Early stopping epochs: fold0=42, fold1=109, fold2=95, fold3=51, fold4=64
+
+| Fold | Dice | IoU | Sensitivity | Precision |
+|------|------|-----|-------------|-----------|
+| 0 | 0.2171 | 0.2040 | 0.3961 | 0.5294 |
+| 1 | 0.2072 | 0.1934 | 0.3091 | 0.5515 |
+| 2 | 0.1470 | 0.1319 | 0.2577 | 0.3358 |
+| 3 | 0.1317 | 0.1077 | 0.4133 | 0.3252 |
+| 4 | 0.1703 | 0.1612 | 0.3677 | 0.2534 |
+| **Mean** | **0.175** | **0.160** | **0.349** | **0.399** |
+| **Std**  | **0.037** | **0.041** | **0.064** | **0.133** |
+
+**Key result**: Regresión severa — Dice 0.175 vs 0.551 en Exp 4 (−0.376). El intensity augmentation empeoró drásticamente el rendimiento.
+
+**Diagnóstico**:
+1. **Val dice erráticodesde el inicio**: el val dice oscila sin patrón (ej. fold 4: 0.006 → 0.079 → 0.006 → 0.110 → 0.164) en lugar de converger suavemente. El pico se alcanza en épocas tempranas (12–34) y el modelo no mejora después, señal de que aprendió a sobreajustarse a los patrones augmentados sin transferir a las imágenes de validación limpias.
+2. **Distribución de entrenamiento vs. validación divergen**: los rangos gamma U[0.7, 1.5] y brightness U[−0.2, 0.2] con p=0.5 por cada transform son suficientemente agresivos para crear una distribución de entrenamiento marcadamente distinta a la de validación (sin augmentation). El modelo optimiza para imágenes con artefactos de intensidad en lugar de aprender features robustos.
+3. **Más épocas no ayudan**: extender de epochs=100/patience=15 a epochs=200/patience=30 no mejoró los resultados — los folds pararon igualmente en 42–109 épocas sin mejora sustancial.
+
+**Conclusión**: El intensity augmentation con estos rangos es contraproducente en este dataset. El augmentation geométrico (Exp 4) es suficiente. Si se quiere explorar augmentation de intensidad en el futuro, empezar con rangos mucho más conservadores (gamma U[0.9, 1.1], brightness ±0.05, p≤0.3).
+
+---
+
 ## Summary across experiments
 
-| Exp | Loss | alpha | Preprocesamiento | Mean Dice | Std Dice | Mean Sensitivity | Mean Precision |
-|-----|------|-------|-----------------|-----------|----------|------------------|----------------|
-| 1 | Dice+BCE | — | zoom proporcional | 0.553 | 0.051 | 0.578 | 0.661 |
-| 2 | Dice+BCE + N4 | — | zoom proporcional | 0.553 | 0.051 | 0.578 | 0.661 |
-| 3 | Tversky | 0.7 | zoom proporcional | 0.543 | 0.069 | 0.630 | 0.590 |
-| **4** | **Tversky** | **0.6** | **zoom proporcional** | **0.551** | **0.056** | **0.626** | **0.605** |
-| 5 | Tversky | 0.6 | registro sitk rigid | 0.132 | 0.028 | 0.360 | 0.322 |
+| Exp | Loss | alpha | Augmentation | Mean Dice | Std Dice | Mean Sensitivity | Mean Precision |
+|-----|------|-------|-------------|-----------|----------|------------------|----------------|
+| 1 | Dice+BCE | — | geométrico | 0.553 | 0.051 | 0.578 | 0.661 |
+| 2 | Dice+BCE + N4 | — | geométrico | 0.553 | 0.051 | 0.578 | 0.661 |
+| 3 | Tversky | 0.7 | geométrico | 0.543 | 0.069 | 0.630 | 0.590 |
+| **4** | **Tversky** | **0.6** | **geométrico** | **0.551** | **0.056** | **0.626** | **0.605** |
+| 5 | Tversky | 0.6 | geométrico (sitk rigid) | 0.132 | 0.028 | 0.360 | 0.322 |
+| 6 | Tversky | 0.6 | geométrico + gamma + brightness | 0.175 | 0.037 | 0.349 | 0.399 |
 
-**Takeaway**: Exp 4 sigue siendo el mejor resultado. El registro anatómico (Exp 5) produce una regresión severa porque los headers NIfTI de este dataset no contienen coordenadas espaciales reales — el registro optimiza sobre información posicional inexistente. Revertir a zoom proporcional para cualquier iteración futura. Próximos levers: arquitectura 2.5D, augmentation más agresivo, o explorar el fold 1 (bottleneck persistente ≈0.48 en todos los experimentos con zoom).
+**Takeaway**: Exp 4 sigue siendo el mejor resultado. Exp 5 (registro rígido) y Exp 6 (intensity augmentation) producen regresiones severas. El registro falla porque los headers NIfTI del dataset son sintéticos. El intensity augmentation falla porque los rangos gamma U[0.7,1.5] y brightness ±0.2 crean una distribución de entrenamiento demasiado distinta a la de validación. Próximos levers potenciales: arquitectura 2.5D (U-Net con contexto inter-slice), augmentation de intensidad con rangos conservadores (gamma U[0.9,1.1], brightness ±0.05), o cambiar la estrategia de split para distribuir mejor los pacientes difíciles.

@@ -1,0 +1,40 @@
+# Exp 6: intensity augmentation (gamma jitter + brightness shift)
+# Adds gamma jitter U[0.7, 1.5] and additive brightness shift U[-0.2, 0.2]
+# on top of the existing geometric augmentation (flips + rot90).
+# Everything else identical to Exp 4 (Tversky alpha=0.6, zoom preprocessing).
+
+data:
+  index_csv: data/processed/index.csv
+  modalities: [t1, t2, flair]
+  image_size: 256
+  registration: none               # zoom proporcional (mismo que Exp 4)
+
+split:
+  n_folds: 5
+  seed: 42
+  folds_to_run: [0, 1, 2, 3, 4]
+
+model:
+  base_channels: 32
+
+train:
+  batch_size: 8
+  num_workers: 2
+  lr: 0.0001
+  epochs: 200
+  loss: tversky
+  tversky_alpha: 0.6
+  tversky_beta: 0.4
+  bce_weight: 0.5
+  lr_patience: 5
+  early_stop_patience: 30
+  augment: true                    # enables flips + rot90 + gamma jitter + brightness jitter
+
+output:
+  checkpoint_dir: outputs/checkpoints
+  figures_dir: outputs/figures
+
+smoke_test:
+  patient_limit: 4
+  epochs: 2
+  batch_size: 2
