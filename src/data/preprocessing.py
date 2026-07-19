@@ -199,43 +199,60 @@ def load_patient_volumes(
     modalities = modalities or list(MODALITY_KEYWORDS.keys())
     reference_modality = reference_modality if reference_modality in modalities else modalities[0]
 
-    raw_sitk: dict[str, sitk.Image] = {}
-    for modality in modalities:
-        path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
-        if path is None:
-            raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
-        # ReadImage preserves spacing, origin, and direction cosines — required for correct
-        # inter-modality registration when FOVs or origins differ across modalities.
-        img = sitk.ReadImage(str(path), sitk.sitkFloat32)
-        if bias_correct:
-            img = _n4_bias_correct_sitk(img)
-        raw_sitk[modality] = img
-
     mask_path = _find_mask_file(patient_dir, reference_modality)
     if mask_path is None:
         raise FileNotFoundError(f"Could not find lesion mask in {patient_dir}")
     mask = (np.asarray(nib.load(str(mask_path)).dataobj) > 0).astype(np.uint8)
 
-    fixed_sitk = raw_sitk[reference_modality]
-    # sitk.GetArrayFromImage returns (Z, Y, X); convert to nibabel convention (X, Y, Z)
-    # so the rest of the pipeline can slice with volume[:, :, z] unchanged.
-    ref_arr = np.moveaxis(sitk.GetArrayFromImage(fixed_sitk).astype(np.float32), 0, -1)
-    fixed_shape_nib = ref_arr.shape  # (H, W, Z) in nibabel convention
+    if not register:
+        # Nibabel path: preserves (X, Y, Z) axis order matching the mask convention.
+        # N4 is applied on numpy arrays (no spatial metadata needed for intensity correction).
+        raw_nib: dict[str, np.ndarray] = {}
+        for modality in modalities:
+            path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
+            if path is None:
+                raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
+            vol = np.asarray(nib.load(str(path)).dataobj, dtype=np.float32)
+            if bias_correct:
+                vol = _n4_bias_correct(vol)
+            raw_nib[modality] = vol
 
-    volumes: dict[str, np.ndarray] = {}
+        ref_shape = raw_nib[reference_modality].shape  # (X, Y, Z)
+        volumes: dict[str, np.ndarray] = {}
+        for modality, vol in raw_nib.items():
+            if vol.shape == ref_shape:
+                volumes[modality] = vol
+            else:
+                zoom_factors = [t / s for t, s in zip(ref_shape, vol.shape)]
+                volumes[modality] = nd_zoom(vol, zoom_factors, order=1)
+        volumes["mask"] = mask
+        return volumes
+
+    # Registration path: sitk.ReadImage preserves spacing/origin/direction for Euler3D alignment.
+    # sitk.GetArrayFromImage returns (Z, Y, X); np.moveaxis converts to nibabel (X, Y, Z).
+    raw_sitk: dict[str, sitk.Image] = {}
+    for modality in modalities:
+        path = _find_file(patient_dir, MODALITY_KEYWORDS[modality], exclude=MASK_KEYWORDS)
+        if path is None:
+            raise FileNotFoundError(f"Could not find '{modality}' volume in {patient_dir}")
+        img = sitk.ReadImage(str(path), sitk.sitkFloat32)
+        if bias_correct:
+            img = _n4_bias_correct_sitk(img)
+        raw_sitk[modality] = img
+
+    fixed_sitk = raw_sitk[reference_modality]
+    ref_arr = np.moveaxis(sitk.GetArrayFromImage(fixed_sitk).astype(np.float32), 0, -1)
+    fixed_shape_nib = ref_arr.shape  # (X, Y, Z) in nibabel convention
+
+    volumes = {}
     for modality, img in raw_sitk.items():
         if img.GetSize() == fixed_sitk.GetSize():
             arr = sitk.GetArrayFromImage(img).astype(np.float32)
             volumes[modality] = np.moveaxis(arr, 0, -1)
-        elif register:
+        else:
             resampled = _register_sitk(img, fixed_sitk)
             arr = sitk.GetArrayFromImage(resampled).astype(np.float32)
             volumes[modality] = np.moveaxis(arr, 0, -1)
-        else:
-            arr = sitk.GetArrayFromImage(img).astype(np.float32)
-            arr_nib = np.moveaxis(arr, 0, -1)  # (H, W, Z)
-            zoom_factors = [t / s for t, s in zip(fixed_shape_nib, arr_nib.shape)]
-            volumes[modality] = nd_zoom(arr_nib, zoom_factors, order=1)
     volumes["mask"] = mask
     return volumes
 

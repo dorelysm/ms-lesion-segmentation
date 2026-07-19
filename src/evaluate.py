@@ -42,7 +42,8 @@ def evaluate_fold(fold_idx: int, val_ids: list, index_df: pd.DataFrame, cfg: dic
     val_loader = DataLoader(val_ds, batch_size=cfg["train"]["batch_size"], shuffle=False, num_workers=0)
 
     metric_sums, n_batches = None, 0
-    sample_batch = None
+    # Accumulate all slices to pick the ones with the most lesion pixels for the figure
+    all_images, all_gt, all_pred, all_lesion_px = [], [], [], []
     with torch.no_grad():
         for batch in val_loader:
             images = batch["image"].to(device)
@@ -56,16 +57,26 @@ def evaluate_fold(fold_idx: int, val_ids: list, index_df: pd.DataFrame, cfg: dic
                 metric_sums[k] += v
             n_batches += 1
 
-            if sample_batch is None:
-                gt_np = masks.cpu().numpy()[:, 0]
-                if gt_np.any():  # prefer a batch that contains at least one lesion slice
-                    sample_batch = {
-                        "images": images.cpu().numpy(),
-                        "gt": gt_np,
-                        "pred": (torch.sigmoid(logits) > 0.5).float().cpu().numpy()[:, 0],
-                    }
+            gt_np = masks.cpu().numpy()[:, 0]          # (B, H, W)
+            pred_np = (torch.sigmoid(logits) > 0.5).float().cpu().numpy()[:, 0]
+            img_np = images.cpu().numpy()               # (B, C, H, W)
+            lesion_px = gt_np.reshape(len(gt_np), -1).sum(axis=1)  # lesion voxels per slice
+            for b in range(len(gt_np)):
+                all_images.append(img_np[b])
+                all_gt.append(gt_np[b])
+                all_pred.append(pred_np[b])
+                all_lesion_px.append(lesion_px[b])
 
     avg_metrics = {k: v / n_batches for k, v in metric_sums.items()}
+
+    # Pick the 4 slices with the most ground-truth lesion pixels for the example figure
+    import numpy as _np
+    order = _np.argsort(all_lesion_px)[::-1][:4]
+    sample_batch = {
+        "images": _np.stack([all_images[i] for i in order]),
+        "gt": _np.stack([all_gt[i] for i in order]),
+        "pred": _np.stack([all_pred[i] for i in order]),
+    }
     return avg_metrics, sample_batch
 
 
