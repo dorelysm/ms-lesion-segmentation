@@ -1,9 +1,17 @@
 # MS Lesion Segmentation
 
-A 2D U-Net that segments multiple sclerosis (MS) lesions in brain MRI (T1/T2/FLAIR), trained
-end-to-end on GPU with patient-level 5-fold cross-validation. MS is diagnosed and monitored largely
-through counting and tracking these lesions on MRI — manual segmentation is slow and has real
-inter-rater variability, which is the practical motivation for automating it.
+La esclerosis múltiple (EM) es una enfermedad neurológica en la que el sistema inmunitario ataca la
+mielina del cerebro y la médula espinal, dejando cicatrices visibles en la resonancia magnética
+llamadas lesiones. Los neurólogos monitorean el avance de la enfermedad contando y midiendo esas
+lesiones en cada nueva resonancia — un proceso que puede tomar 20–40 minutos por paciente, y donde
+dos radiólogos distintos a veces no coinciden exactamente. Este proyecto entrena una red neuronal
+para hacer esa misma delimitación automáticamente, a partir de ejemplos previamente anotados por
+expertos.
+
+**En concreto**: un 2D U-Net entrenado sobre MRI cerebrales (T1/T2/FLAIR) de 60 pacientes con EM,
+con validación cruzada de 5 pliegues a nivel de paciente. La U-Net es un tipo de red neuronal
+diseñada específicamente para segmentación de imágenes médicas: aprende a identificar patrones
+visuales en miles de ejemplos anotados y luego aplica ese conocimiento en imágenes nuevas.
 
 **Result**: Dice 0.563 ± 0.047, sensitivity 0.604 across 5 folds (60 patients). See
 [Results](#results) below and the full critical analysis in
@@ -17,6 +25,10 @@ inter-rater variability, which is the practical motivation for automating it.
 
 ![Prediction examples: MRI slice, ground truth, and model prediction overlays](outputs/figures/prediction_examples.png)
 
+*Cada fila es un corte axial del cerebro. Izquierda: imagen MRI (canal FLAIR). Centro: anotación del
+radiólogo (lesión en blanco). Derecha: predicción del modelo (lesión en blanco). Las áreas donde
+ambos coinciden son las lesiones detectadas correctamente.*
+
 ![Training and validation loss/Dice curves per fold](outputs/figures/training_curves.png)
 
 | Metric | Mean ± std (5-fold) |
@@ -25,6 +37,13 @@ inter-rater variability, which is the practical motivation for automating it.
 | IoU | 0.441 ± 0.040 |
 | Sensitivity | 0.604 ± 0.038 |
 | Precision | 0.640 ± 0.034 |
+
+> **¿Qué significa Dice = 0.563?** El coeficiente Dice mide el solapamiento entre la predicción del
+> modelo y la anotación del radiólogo: 1.0 sería coincidencia perfecta, 0.0 significa que no detecta
+> nada. Un valor de 0.563 indica que el modelo y el especialista coinciden en aproximadamente el 56%
+> del área de lesión — suficiente para asistir como herramienta de screening, pero no para reemplazar
+> la revisión clínica. Para contexto, la variabilidad entre radiólogos humanos en esta tarea suele
+> dar Dice de 0.60–0.70.
 
 Best result from 6 training experiments (see [`outputs/experiments.md`](outputs/experiments.md)). Note: a preprocessing axis bug (nibabel vs SimpleITK convention mismatch) was discovered and fixed after Exp 5; the numbers above reflect the corrected retraining.
 
@@ -163,7 +182,10 @@ prediction-only mode without computing Dice.
 ## Method notes
 
 - **Task**: 2D axial-slice binary segmentation (lesion vs. background) with a from-scratch U-Net.
-- **Modalities**: T1/T2/FLAIR are *not* co-registered in this dataset (each has its own native
+- **Modalities**: Each MRI scan comes in three "flavors" that highlight different tissue properties —
+  T1 shows general brain anatomy, T2 is sensitive to water and inflammation, and FLAIR suppresses
+  cerebrospinal fluid so lesions stand out more clearly. The model uses all three simultaneously as
+  input channels. T1/T2/FLAIR are *not* co-registered in this dataset (each has its own native
   resolution/slice count per patient) — `preprocessing.py` N4-corrects each modality in its own
   space, then registers T1/T2 onto the FLAIR grid via SimpleITK rigid registration (Euler3D
   transform, Mattes mutual information metric, multi-resolution pyramid 4→2→1). Use
