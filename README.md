@@ -31,6 +31,11 @@ ambos coinciden son las lesiones detectadas correctamente.*
 
 ![Training and validation loss/Dice curves per fold](outputs/figures/training_curves.png)
 
+*Curvas de pérdida y Dice durante el entrenamiento, una línea por fold. Las líneas sólidas son el
+conjunto de entrenamiento; las punteadas, validación. La caída rápida al inicio es normal — el
+modelo aprende lo más obvio primero. La divergencia al final de algunos folds es donde el early
+stopping detuvo el entrenamiento para evitar sobreajuste.*
+
 | Metric | Mean ± std (5-fold) |
 |---|---|
 | Dice | 0.563 ± 0.047 |
