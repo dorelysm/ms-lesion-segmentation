@@ -5,7 +5,7 @@ end-to-end on GPU with patient-level 5-fold cross-validation. MS is diagnosed an
 through counting and tracking these lesions on MRI — manual segmentation is slow and has real
 inter-rater variability, which is the practical motivation for automating it.
 
-**Result**: Dice 0.551 ± 0.056, sensitivity 0.626 across 5 folds (60 patients). See
+**Result**: Dice 0.563 ± 0.047, sensitivity 0.604 across 5 folds (60 patients). See
 [Results](#results) below and the full critical analysis in
 [`notebooks/03_results_report.ipynb`](notebooks/03_results_report.ipynb).
 
@@ -21,12 +21,12 @@ inter-rater variability, which is the practical motivation for automating it.
 
 | Metric | Mean ± std (5-fold) |
 |---|---|
-| Dice | 0.551 ± 0.056 |
-| IoU | 0.428 ± 0.049 |
-| Sensitivity | 0.626 ± 0.034 |
-| Precision | 0.605 ± 0.066 |
+| Dice | 0.563 ± 0.047 |
+| IoU | 0.441 ± 0.040 |
+| Sensitivity | 0.604 ± 0.038 |
+| Precision | 0.640 ± 0.034 |
 
-Best result from 6 training experiments (see [`outputs/experiments.md`](outputs/experiments.md)).
+Best result from 6 training experiments (see [`outputs/experiments.md`](outputs/experiments.md)). Note: a preprocessing axis bug (nibabel vs SimpleITK convention mismatch) was discovered and fixed after Exp 5; the numbers above reflect the corrected retraining.
 
 ## What we found
 
