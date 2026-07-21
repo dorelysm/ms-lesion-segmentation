@@ -155,3 +155,110 @@ Early stopping epochs: fold0=42, fold1=109, fold2=95, fold3=51, fold4=64
 | 6 | Tversky | 0.6 | geométrico + gamma + brightness | 0.175 | 0.037 | 0.349 | 0.399 |
 
 **Takeaway**: Exp 4 sigue siendo el mejor resultado. Exp 5 (registro rígido) y Exp 6 (intensity augmentation) producen regresiones severas. El registro falla porque los headers NIfTI del dataset son sintéticos. El intensity augmentation falla porque los rangos gamma U[0.7,1.5] y brightness ±0.2 crean una distribución de entrenamiento demasiado distinta a la de validación. Próximos levers potenciales: arquitectura 2.5D (U-Net con contexto inter-slice), augmentation de intensidad con rangos conservadores (gamma U[0.9,1.1], brightness ±0.05), o cambiar la estrategia de split para distribuir mejor los pacientes difíciles.
+
+---
+
+## Future Experiments
+
+Los experimentos siguientes no se han ejecutado. Se documentan aquí para que un investigador pueda
+retomar el trabajo a partir del estado actual (Exp 4, Dice 0.563 ± 0.047 tras el fix de eje de
+preprocesamiento). El punto de partida en todos los casos es `configs/baseline.yaml` como referencia.
+
+---
+
+### Exp 7 — Split estratificado por lesion burden
+
+**Motivación**: El fold 1 tiene Dice persistentemente menor (~0.496 vs ~0.57 en otros folds). La
+investigación mostró que este fold contiene 2 pacientes con lesiones microscópicas (pacientes 20 y
+53, mediana ~17–19 vóxeles a 256×256 — aproximadamente un blob de 4×5 píxeles). Estos pacientes
+cayeron en el mismo fold de validación por azar, no por diseño. Con `StratifiedKFold` sobre bins de
+lesion burden, se distribuirían uniformemente entre folds, haciendo que la std inter-fold refleje
+la variabilidad real del modelo en lugar de la variabilidad del split.
+
+**Cambios**:
+- `src/data/dataset.py`: reemplazar `KFold` por `StratifiedKFold` en `patient_kfold_splits`.
+  Calcular un label por paciente: `lesion_ratio = n_lesion_slices / total_slices`; discretizar en
+  3–4 bins con `pd.qcut`; pasar como `y` a `StratifiedKFold.split`.
+- `configs/exp7_stratified_split.yaml`: copia de `baseline.yaml` (sin cambios de hiperparámetros).
+- `outputs/experiments.md`: registrar resultados tras el run.
+
+**Señal de éxito**: std inter-fold baja respecto a Exp 4 (actualmente 0.047); el Dice de fold 1
+sube hacia el rango de los demás folds (≥0.54). El mean Dice no debería bajar.
+
+**Nota**: este cambio no mejora la capacidad del modelo — mejora la validez de la estimación de
+rendimiento. Conviene correrlo antes de Exp 8 y 9 para tener un baseline más limpio.
+
+**Esfuerzo estimado**: ~1 hora (cambio de 10–15 líneas + run completo de entrenamiento).
+
+---
+
+### Exp 8 — Intensity augmentation conservador
+
+**Motivación**: Exp 6 demostró que gamma U[0.7, 1.5] + brightness ±0.2 con p=0.5 crea distribution
+shift severo entre train y val. El objetivo de intensity augmentation sigue siendo válido: el dataset
+proviene de ~20 centros con escáneres distintos, y el modelo debería ser robusto a diferencias de
+contraste inter-escáner. La hipótesis es que rangos mucho más conservadores evitan el distribution
+shift mientras aún aportan regularización.
+
+**Cambios**:
+- `src/data/dataset.py` — modificar `_augment` con los rangos conservadores (revertir Exp 6 si
+  `dataset.py` aún contiene los rangos agresivos):
+  ```python
+  # gamma jitter conservador
+  if np.random.rand() < 0.3:
+      gamma = np.random.uniform(0.9, 1.1)
+      image = np.sign(image) * (np.abs(image) ** gamma)
+  # brightness jitter conservador
+  if np.random.rand() < 0.3:
+      delta = np.random.uniform(-0.05, 0.05)
+      image = image + delta
+  ```
+- `configs/exp8_conservative_aug.yaml`: copia de `baseline.yaml` con comentarios doc sobre los rangos.
+- `outputs/experiments.md`: registrar resultados.
+
+**Señal de éxito**: val dice converge suavemente desde epoch 1 (sin el comportamiento errático de
+Exp 6); mean Dice ≥ 0.563 (Exp 4 actual); std inter-fold baja. Si val dice oscila desde epoch 1,
+reducir más los rangos (gamma ±0.05, brightness ±0.02) antes de concluir que el concepto no funciona.
+
+**Nota**: verificar primero que `dataset.py` está en el estado de Exp 4 (solo augmentation geométrico)
+antes de aplicar este cambio. `git diff HEAD src/data/dataset.py` para confirmarlo.
+
+**Esfuerzo estimado**: ~2 horas (cambio pequeño + run completo).
+
+---
+
+### Exp 9 — Arquitectura 2.5D (slices adyacentes como canales extra)
+
+**Motivación**: El modelo actual ve cada slice axial de forma independiente. Una lesión que ocupa
+2–3 slices consecutivos se ve como manchas sin conexión entre ellas — la red no puede usar la
+continuidad espacial inter-slice para confirmar o rechazar una detección. Incluir los slices ±1
+como canales extra (de 3 a 9 canales de entrada: T1/T2/FLAIR × 3 slices) da contexto anatómico
+sin el coste de una U-Net 3D completa. Es el cambio con mayor potencial de mejora en lesiones
+pequeñas (1–2 slices de grosor).
+
+**Cambios**:
+- `src/data/preprocessing.py` — sin cambios en el preprocessing. Los slices se apilan en el Dataset.
+- `src/data/dataset.py` — modificar `__getitem__` para cargar el slice central ± n_context slices
+  y apilarlos como canales:
+  ```python
+  # en lugar de image = np.load(row["image_path"])  # (3, H, W)
+  # cargar slice central + vecinos y concatenar en el eje de canal → (9, H, W) con context=1
+  ```
+  Manejar los bordes (primer y último slice del volumen) con padding por reflexión o replicación
+  del slice más cercano.
+- `src/models/unet.py` — solo cambiar `in_channels` en `UNet2D.__init__`: el resto de la
+  arquitectura es agnóstico al número de canales de entrada. Con context=1: `in_channels=9`;
+  con context=2: `in_channels=15`.
+- `configs/exp9_2d5_context1.yaml`: `model.in_channels: 9`, `model.context_slices: 1`.
+- `outputs/experiments.md`: registrar resultados para context=1. Si mejora, probar context=2.
+
+**Señal de éxito**: Dice en fold 1 sube hacia ≥0.53 (las lesiones microscópicas que solo aparecen
+en 1–2 slices son el caso donde más debería ayudar el contexto inter-slice); mean Dice ≥ 0.58.
+
+**Precaución**: asegurarse de que `patient_kfold_splits` sigue siendo patient-level — los slices
+de un mismo paciente deben mantenerse todos en train o todos en val, incluyendo los slices vecinos
+que se usan como contexto. Esto ya está garantizado por la lógica actual del split, pero verificarlo
+con el assertion existente en `dataset.py`.
+
+**Esfuerzo estimado**: ~4–6 horas (cambio en Dataset + UNet + run completo). Es el experimento de
+mayor complejidad y mayor potencial de los tres.
